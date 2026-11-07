@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { writeCellReport } from '../scripts/cell-report.mjs';
-import { publicFailure, safeBuildId, safeLabel, runtimeForReport } from '../scripts/report-utils.mjs';
+import { publicFailure, safeBuildId, safeLabel, runtimeForReport, downloadForReport } from '../scripts/report-utils.mjs';
 import { createPlan, REQUIRED_CHECKS } from '../scripts/profiles.mjs';
 import { collectReportContext } from '../scripts/report-context.mjs';
 import { collectRuntimeEnvironment } from '../scripts/runtime-environment.mjs';
@@ -34,6 +34,7 @@ export default class SafeReporter {
       try {
         diagnostics = JSON.parse(attachment.body ? attachment.body.toString('utf8') : readFileSync(attachment.path, 'utf8'));
         diagnostics.runtimeEnvironment = runtimeForReport(diagnostics.runtimeEnvironment);
+        diagnostics.download = downloadForReport(diagnostics.download);
       } catch { diagnostics = null; }
     }
     let status = result.status === 'passed' && test.expectedStatus === 'passed' ? 'passed' : result.status === 'passed' ? 'unexpected' : result.status;

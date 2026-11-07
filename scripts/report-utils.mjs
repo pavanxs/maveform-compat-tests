@@ -11,6 +11,10 @@ export const PUBLIC_ERROR_CODES = new Set([
   'FIXTURE_MISSING', 'FIXTURE_INVALID', 'SOURCE_LOAD_FAILED', 'SOURCE_LOAD_TIMEOUT',
   'SOURCE_METADATA_MISMATCH', 'SOURCE_BROWSER_DECODE_FAILED', 'SOURCE_BROWSER_FRAME_BLANK',
   'EXPORT_FAILED', 'DOWNLOAD_MISSING', 'DOWNLOAD_FAILED', 'EXPORT_METADATA_MISMATCH',
+  'DOWNLOAD_EVENT_TIMEOUT', 'DOWNLOAD_CLICK_TIMEOUT', 'DOWNLOAD_CLICK_FAILED', 'DOWNLOAD_SAVE_TIMEOUT', 'DOWNLOAD_STATUS_TIMEOUT',
+  'DOWNLOAD_DIAGNOSTIC_TIMEOUT', 'DOWNLOAD_DIAGNOSTIC_FAILED', 'DOWNLOAD_BLOB_UNAVAILABLE',
+  'DOWNLOAD_BLOB_PROBE_TIMEOUT', 'DOWNLOAD_BLOB_PROBE_FAILED', 'DOWNLOAD_CONTROL_SETUP_TIMEOUT',
+  'DOWNLOAD_CONTROL_FAILED', 'DOWNLOAD_CONTROL_CONTENT_MISMATCH',
   'UNEXPECTED_MODEL_RUN', 'MEDIA_TOOL_FAILED', 'OUTPUT_VIDEO_MISSING', 'OUTPUT_AUDIO_MISSING',
   'OUTPUT_VIDEO_CODEC_MISMATCH', 'OUTPUT_AUDIO_CODEC_MISMATCH', 'OUTPUT_DIMENSIONS_MISMATCH',
   'OUTPUT_DURATION_MISMATCH', 'OUTPUT_FILE_TOO_SMALL', 'OUTPUT_FRAME_DECODE_FAILED',
@@ -84,6 +88,42 @@ export function capabilitiesForReport(value = {}) {
     probeErrorCount: Array.isArray(value.probeErrors) ? value.probeErrors.length : 0,
     probeErrorCodes: Array.isArray(value.probeErrors)
       ? [...new Set(value.probeErrors.map(error => runtimeFailure(error, 'CAPABILITY_PROBE_FAILED')))] : [],
+  };
+}
+
+export function downloadForReport(value) {
+  if (!value || typeof value !== 'object') return null;
+  const nonnegative = field => Number.isSafeInteger(field) && field >= 0 ? field : null;
+  const boolean = field => typeof field === 'boolean' ? field : null;
+  const code = field => PUBLIC_ERROR_CODES.has(field) ? field : null;
+  const common = item => ({
+    captions: boolean(item.captions),
+    phase: ['setup', 'event', 'save', 'status', 'complete'].includes(item.phase) ? item.phase : 'unknown',
+    expectedBytes: nonnegative(item.expectedBytes), savedBytes: nonnegative(item.savedBytes),
+    eventReceived: item.eventReceived === true, saveCompleted: item.saveCompleted === true,
+    statusChecked: item.statusChecked === true,
+    browserStatus: ['completed', 'cancelled', 'failed'].includes(item.browserStatus) ? item.browserStatus : null,
+    cancelAttempted: item.cancelAttempted === true, cancelCompleted: item.cancelCompleted === true,
+    ignoredDownloads: nonnegative(item.ignoredDownloads) ?? 0, failureCode: code(item.failureCode),
+  });
+  const blob = value.blob && typeof value.blob === 'object' ? value.blob : null;
+  const control = value.control && typeof value.control === 'object' ? value.control : null;
+  return {
+    ...common(value),
+    failureDiagnosticsAttempted: value.failureDiagnosticsAttempted === true,
+    failureDiagnosticsCompleted: value.failureDiagnosticsCompleted === true,
+    diagnosticFailureCode: code(value.diagnosticFailureCode),
+    blob: blob ? {
+      attempted: blob.attempted === true, completed: blob.completed === true,
+      readable: boolean(blob.readable), bytes: nonnegative(blob.bytes),
+      matchesExpectedBytes: boolean(blob.matchesExpectedBytes),
+      mimeType: ['video/mp4', 'text/plain', 'application/octet-stream', 'other'].includes(blob.mimeType) ? blob.mimeType : null,
+      failureCode: code(blob.failureCode),
+    } : null,
+    control: control ? {
+      ...common(control), attempted: control.attempted === true, completed: control.completed === true,
+      contentMatches: boolean(control.contentMatches), cleanupCompleted: control.cleanupCompleted === true,
+    } : null,
   };
 }
 

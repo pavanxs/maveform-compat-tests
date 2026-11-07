@@ -1,5 +1,5 @@
 import { test as base, expect } from '@playwright/test';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import {
   capabilitiesForReport, snapshotForReport, runtimeFailure, safeBuildId, publicFailure,
@@ -7,6 +7,8 @@ import {
 import { collectRuntimeEnvironment } from '../scripts/runtime-environment.mjs';
 import { collectReportContext } from '../scripts/report-context.mjs';
 import { withDeadline, boundedCleanup, writeCheckpoint, checkIdForFile } from '../scripts/diagnostics.mjs';
+
+import { newDownloadState, saveBrowserDownload, diagnoseDownloadFailure } from '../scripts/downloads.mjs';
 
 export { expect };
 
@@ -43,7 +45,7 @@ export const test = base.extend({
   compat: async ({ _compatPageProgress, page, browser }, use, testInfo) => {
     const diagnostics = {
       stage: 'runtime-environment', browserVersion: browser.version(), capabilities: null,
-      snapshot: null, fixture: null, sourceBrowserDecode: null, exports: [],
+      snapshot: null, fixture: null, sourceBrowserDecode: null, exports: [], download: null,
       captions: null, models: { attempted: false, completed: false }, pageErrorCount: 0, consoleErrorCount: 0,
       failure: null, buildId: null, identityVerified: false,
       runtimeEnvironment: null,
@@ -163,18 +165,20 @@ export const test = base.extend({
         this.checkIdentity(artifact.buildId);
         const saved = await this.snapshot();
         ensure(saved.models?.phase === 'not-run', 'UNEXPECTED_MODEL_RUN');
-        this.stage('download');
-        let download;
-        try {
-          [download] = await Promise.all([
-            page.waitForEvent('download', { timeout: 20_000 }),
-            page.getByTestId('compat-download').click(),
-          ]);
-        } catch { throw new Error('DOWNLOAD_MISSING'); }
-        const filename = this.testInfo.outputPath(captions ? 'captions-on.mp4' : 'captions-off.mp4');
-        try { await download.saveAs(filename); } catch { throw new Error('DOWNLOAD_FAILED'); }
-        ensure(await download.failure() === null, 'DOWNLOAD_FAILED');
-        ensure(statSync(filename).size === artifact.bytes, 'EXPORT_METADATA_MISMATCH');
+        const suffix = captions ? 'captions-on' : 'captions-off';
+        diagnostics.download = newDownloadState(captions, artifact.bytes);
+        const filename = this.testInfo.outputPath(suffix + '.mp4');
+        await saveBrowserDownload({
+          page, filename, state: diagnostics.download,
+          click: timeout => page.getByTestId('compat-download').click({ timeout }),
+          onPhase: phase => this.stage('download-' + phase + '-' + suffix),
+          onUpdate: () => this.checkpoint(),
+          onFailure: state => diagnoseDownloadFailure({
+            page, expectedBytes: artifact.bytes, state,
+            controlFilename: this.testInfo.outputPath('download-control-' + suffix + '.txt'),
+            onUpdate: () => this.checkpoint(),
+          }),
+        });
         return { file: filename, artifact: snapshotForReport({ export: { artifact } }).export.artifact };
       },
     };

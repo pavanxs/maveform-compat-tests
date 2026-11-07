@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { runtimeForReport, safeBuildId, safeLabel } from './report-utils.mjs';
+import { runtimeForReport, downloadForReport, safeBuildId, safeLabel } from './report-utils.mjs';
 
 export const DIAGNOSTIC_STAGES = new Set([
   'test-starting', 'browser-launch', 'browser-ready', 'browser-teardown', 'page-setup',
@@ -8,6 +8,8 @@ export const DIAGNOSTIC_STAGES = new Set([
   'runtime-version-context', 'runtime-version-page', 'runtime-version-navigation', 'runtime-version-read',
   'runtime-environment-ready', 'opening', 'navigation', 'identity', 'capabilities', 'source-upload',
   'browser-source-decode', 'export-captions-on', 'export-captions-off', 'download',
+  'download-event-captions-off', 'download-event-captions-on', 'download-save-captions-off', 'download-save-captions-on',
+  'download-status-captions-off', 'download-status-captions-on', 'download-complete-captions-off', 'download-complete-captions-on',
   'validate-media', 'validate-captions', 'compare-captions', 'caption-comparison', 'caption-pixel-comparison',
   'external-validation-captions-off', 'external-validation-captions-on', 'real-core-models', 'complete',
 ]);
@@ -41,6 +43,7 @@ export function progressForReport(checkId, diagnostics, context) {
     buildId: safeBuildId(diagnostics?.buildId), identityVerified: diagnostics?.identityVerified === true,
     runtimeEnvironment: diagnostics?.runtimeEnvironment ? runtimeForReport(diagnostics.runtimeEnvironment) : null,
     models: { attempted: diagnostics?.models?.attempted === true, completed: diagnostics?.models?.completed === true },
+    download: downloadForReport(diagnostics?.download),
     updatedAt: typeof diagnostics?.updatedAt === 'string' && /^\d{4}-\d{2}-\d{2}T[0-9:.]+Z$/.test(diagnostics.updatedAt) ? diagnostics.updatedAt : new Date().toISOString(),
   };
 }
