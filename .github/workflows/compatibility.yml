@@ -1,0 +1,147 @@
+name: Browser compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_url:
+        description: HTTPS preview origin; falls back to MAVEFORM_PREVIEW_URL repository variable
+        required: false
+        type: string
+      expected_build_id:
+        description: Exact preview build ID; falls back to MAVEFORM_EXPECTED_BUILD_ID repository variable
+        required: false
+        type: string
+      suite:
+        description: Smoke uses synthetic media only; models also runs real speech and Atlas models
+        required: true
+        default: smoke
+        type: choice
+        options: [smoke, models]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compatibility-${{ github.ref }}-${{ inputs.suite }}
+  cancel-in-progress: false
+
+jobs:
+  browser:
+    name: ${{ matrix.id }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: mac-intel-chrome
+            runner: macos-15-intel
+            browser: chrome
+          - id: mac-intel-webkit
+            runner: macos-15-intel
+            browser: webkit
+          - id: mac-arm64-chrome
+            runner: macos-15
+            browser: chrome
+          - id: mac-arm64-webkit
+            runner: macos-15
+            browser: webkit
+          - id: windows-chrome
+            runner: windows-2025
+            browser: chrome
+          - id: windows-edge
+            runner: windows-2025
+            browser: msedge
+    env:
+      MAVEFORM_BASE_URL: ${{ inputs.preview_url || vars.MAVEFORM_PREVIEW_URL }}
+      MAVEFORM_EXPECTED_BUILD_ID: ${{ inputs.expected_build_id || vars.MAVEFORM_EXPECTED_BUILD_ID }}
+      COMPAT_SUITE: ${{ inputs.suite }}
+      COMPAT_BROWSER: ${{ matrix.browser }}
+      COMPAT_CELL_ID: ${{ matrix.id }}
+      COMPAT_RUNNER_LABEL: ${{ matrix.runner }}
+    steps:
+      # Official tag SHAs verified on 2026-11-07. Only this public repo is checked out.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Validate target and exact build ID
+        id: target
+        run: node scripts/target.mjs
+      - name: Install public harness dependencies
+        id: dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Locate or install FFmpeg and ffprobe
+        id: tools
+        run: node scripts/setup-media.mjs
+      - name: Install the selected browser
+        id: browser
+        shell: bash
+        run: node node_modules/@playwright/test/cli.js install "$COMPAT_BROWSER"
+      - name: Generate only synthetic fixtures
+        id: fixtures
+        shell: bash
+        run: |
+          if [ "$COMPAT_SUITE" = "models" ]; then
+            node scripts/generate-fixtures.mjs --speech
+          else
+            node scripts/generate-fixtures.mjs
+          fi
+      - name: Run the deployed application checks
+        id: tests
+        shell: bash
+        run: node scripts/run-tests.mjs "$COMPAT_SUITE"
+      - name: Record success, failure, or setup blocker
+        if: always()
+        env:
+          COMPAT_TARGET_OUTCOME: ${{ steps.target.outcome }}
+          COMPAT_DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          COMPAT_TOOLS_OUTCOME: ${{ steps.tools.outcome }}
+          COMPAT_BROWSER_OUTCOME: ${{ steps.browser.outcome }}
+          COMPAT_FIXTURES_OUTCOME: ${{ steps.fixtures.outcome }}
+          COMPAT_TEST_OUTCOME: ${{ steps.tests.outcome }}
+        run: node scripts/record-cell.mjs
+      - name: Upload only sanitized reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: compatibility-cell-${{ matrix.id }}
+          path: reports/public/
+          if-no-files-found: error
+          retention-days: 3
+
+  matrix-report:
+    name: Complete compatibility report
+    needs: browser
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      COMPAT_SUITE: ${{ inputs.suite }}
+      MAVEFORM_EXPECTED_BUILD_ID: ${{ inputs.expected_build_id || vars.MAVEFORM_EXPECTED_BUILD_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: compatibility-cell-*
+          path: reports/downloaded
+      - name: Report every requested runner, including missing cells
+        if: always()
+        run: node scripts/matrix-report.mjs
+      - name: Keep the combined report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: compatibility-matrix
+          path: reports/matrix/
+          if-no-files-found: error
+          retention-days: 3

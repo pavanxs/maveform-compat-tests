@@ -1,0 +1,22 @@
+{
+  "name": "maveform-compat-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Public standalone browser compatibility checks against a deployed Maveform preview.",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "setup:media": "node scripts/setup-media.mjs",
+    "fixtures": "node scripts/generate-fixtures.mjs",
+    "fixtures:models": "node scripts/generate-fixtures.mjs --speech",
+    "test:smoke": "node scripts/run-tests.mjs smoke",
+    "test:models": "node scripts/run-tests.mjs models",
+    "report:matrix": "node scripts/matrix-report.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0"
+  }
+}

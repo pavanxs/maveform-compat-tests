@@ -1,0 +1,17 @@
+node_modules/
+.generated/
+reports/
+.local-test-results/
+.local-report/
+blob-report/
+playwright-report/
+test-results/
+.env
+.env.*
+*.log
+*.mp4
+*.wav
+*.aiff
+*.webm
+*.zip
+.DS_Store
