@@ -10,5 +10,6 @@ for (const file of files) {
   const result = spawnSync(process.execPath, ['--check', file], { stdio: 'inherit', windowsHide: true });
   if (result.status !== 0) process.exit(result.status || 1);
 }
-const tests = spawnSync(process.execPath, ['--test', 'scripts/harness.test.mjs'], { stdio: 'inherit', windowsHide: true });
+const testFiles = readdirSync('scripts').filter(file => file.endsWith('.test.mjs')).map(file => path.join('scripts', file));
+const tests = spawnSync(process.execPath, ['--test', ...testFiles], { stdio: 'inherit', windowsHide: true });
 process.exitCode = tests.status ?? 1;

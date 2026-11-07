@@ -6,6 +6,7 @@ import {
 } from '../scripts/report-utils.mjs';
 import { collectRuntimeEnvironment } from '../scripts/runtime-environment.mjs';
 import { collectReportContext } from '../scripts/report-context.mjs';
+import { withDeadline, boundedCleanup, writeCheckpoint, checkIdForFile } from '../scripts/diagnostics.mjs';
 
 export { expect };
 
@@ -24,22 +25,38 @@ export function fixture(kind = 'smoke') {
 }
 
 export const test = base.extend({
-  compat: async ({ page, browser }, use, testInfo) => {
+  _compatWorkerProgress: [async ({}, use) => {
+    const context = collectReportContext();
+    writeCheckpoint('worker', { stage: 'browser-launch' }, context);
+    await use();
+  }, { scope: 'worker', auto: true }],
+  _compatBrowserReady: [async ({ _compatWorkerProgress, browser }, use) => {
+    const context = collectReportContext();
+    writeCheckpoint('worker', { stage: 'browser-ready' }, context);
+    try { await use(); }
+    finally { writeCheckpoint('worker', { stage: 'browser-teardown' }, context); }
+  }, { scope: 'worker', auto: true }],
+  _compatPageProgress: [async ({}, use, testInfo) => {
+    writeCheckpoint(checkIdForFile(testInfo.file), { stage: 'page-setup' }, collectReportContext());
+    await use();
+  }, { auto: true }],
+  compat: async ({ _compatPageProgress, page, browser }, use, testInfo) => {
     const diagnostics = {
-      stage: 'opening', browserVersion: browser.version(), capabilities: null,
+      stage: 'runtime-environment', browserVersion: browser.version(), capabilities: null,
       snapshot: null, fixture: null, sourceBrowserDecode: null, exports: [],
       captions: null, models: { attempted: false, completed: false }, pageErrorCount: 0, consoleErrorCount: 0,
       failure: null, buildId: null, identityVerified: false,
-      runtimeEnvironment: await collectRuntimeEnvironment({ browser, channel: testInfo.project.use.channel || 'webkit' }),
+      runtimeEnvironment: null,
       reportContext: collectReportContext(),
     };
     page.on('pageerror', () => { diagnostics.pageErrorCount++; });
     page.on('console', message => { if (message.type() === 'error') diagnostics.consoleErrorCount++; });
     const compat = {
       page, diagnostics, testInfo,
-      stage(name) { diagnostics.stage = name; },
+      checkpoint() { return writeCheckpoint(checkIdForFile(testInfo.file), diagnostics, diagnostics.reportContext); },
+      stage(name) { diagnostics.stage = name; this.checkpoint(); },
       async call(method, args = [], fallbackCode = 'COMPAT_METHOD_MISSING') {
-        const result = await page.evaluate(async ({ method, args }) => {
+        const request = () => page.evaluate(async ({ method, args }) => {
           const bridge = window.__MAVEFORM_COMPAT__;
           if (!bridge || typeof bridge[method] !== 'function') return { ok: false, missing: true };
           try { return { ok: true, value: await bridge[method](...args) }; }
@@ -47,6 +64,8 @@ export const test = base.extend({
             return { ok: false, message: String(error?.message || error) };
           }
         }, { method, args });
+        const result = method === 'snapshot' ? await withDeadline(request, 5000, 'SNAPSHOT_TIMEOUT') :
+          method === 'capabilities' ? await withDeadline(request, 20_000, 'CAPABILITY_PROBE_TIMEOUT') : await request();
         if (!result.ok) throw new Error(result.missing ? 'COMPAT_METHOD_MISSING' : runtimeFailure(result.message, fallbackCode));
         return result.value;
       },
@@ -63,6 +82,7 @@ export const test = base.extend({
         if (diagnostics.buildId) ensure(diagnostics.buildId === buildId, 'BUILD_ID_CHANGED_DURING_RUN');
         diagnostics.buildId = buildId;
         diagnostics.identityVerified = Boolean(expected && buildId === expected);
+        this.checkpoint();
       },
       async open() {
         this.stage('navigation');
@@ -76,6 +96,8 @@ export const test = base.extend({
         try {
           await page.waitForFunction(() => window.__MAVEFORM_COMPAT__?.version === 1, undefined, { timeout: 15_000 });
         } catch { throw new Error('COMPAT_CONTRACT_MISSING'); }
+        this.stage('identity');
+        await this.snapshot();
         this.stage('capabilities');
         const capabilities = await this.call('capabilities', [], 'CAPABILITY_PROBE_FAILED');
         diagnostics.capabilities = capabilitiesForReport(capabilities);
@@ -156,16 +178,30 @@ export const test = base.extend({
         return { file: filename, artifact: snapshotForReport({ export: { artifact } }).export.artifact };
       },
     };
-    try { await use(compat); }
-    finally {
+    compat.checkpoint();
+    try {
+      diagnostics.runtimeEnvironment = await collectRuntimeEnvironment({
+        browser, channel: testInfo.project.use.channel || 'webkit',
+        onStage: stage => compat.stage(stage),
+      });
+      compat.checkpoint();
+      ensure(!['unknown', 'universal'].includes(diagnostics.runtimeEnvironment.arch.browser), 'BROWSER_ARCHITECTURE_UNKNOWN');
+      ensure(diagnostics.runtimeEnvironment.arch.host === diagnostics.runtimeEnvironment.arch.node &&
+        diagnostics.runtimeEnvironment.arch.host === diagnostics.runtimeEnvironment.arch.browser, 'BROWSER_ARCHITECTURE_MISMATCH');
+      await use(compat);
+    } catch (error) {
+      diagnostics.failure = publicFailure(error, diagnostics.stage);
+      throw error;
+    } finally {
       try {
-        const final = await page.evaluate(() => window.__MAVEFORM_COMPAT__?.snapshot());
+        const final = await withDeadline(() => page.evaluate(() => window.__MAVEFORM_COMPAT__?.snapshot()), 2000, 'SNAPSHOT_TIMEOUT');
         if (final) diagnostics.snapshot = snapshotForReport(final);
       } catch { /* Closed/crashed browser is represented by test failure, not hidden. */ }
-      if (testInfo.status !== 'passed') diagnostics.failure = publicFailure(testInfo.error, diagnostics.stage);
-      await testInfo.attach('safe-diagnostics', {
+      if (testInfo.status !== 'passed' && !diagnostics.failure) diagnostics.failure = publicFailure(testInfo.error, diagnostics.stage);
+      compat.checkpoint();
+      await boundedCleanup(() => testInfo.attach('safe-diagnostics', {
         body: Buffer.from(JSON.stringify(diagnostics)), contentType: 'application/json',
-      });
+      }), 2000);
     }
   },
 });

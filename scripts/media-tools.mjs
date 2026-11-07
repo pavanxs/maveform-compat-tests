@@ -70,7 +70,7 @@ export function speechAvailable() {
 export function probeMedia(file) {
   return JSON.parse(runTool(mediaBinary('ffprobe'), [
     '-v', 'error', '-show_entries',
-    'format=duration,size:stream=index,codec_type,codec_name,width,height,duration,nb_frames,r_frame_rate,channels,sample_rate',
+    'format=duration,size:stream=index,codec_type,codec_name,width,height,start_time,duration,nb_frames,r_frame_rate,channels,sample_rate',
     '-of', 'json', file,
   ]));
 }

@@ -1,4 +1,8 @@
 import test from 'node:test';
+import { readFileSync, unlinkSync } from 'node:fs';
+import path from 'node:path';
+import SafeReporter from '../reporters/safe-reporter.mjs';
+import { withDeadline, boundedCleanup, progressForReport, writeCheckpoint, readCheckpoint, clearCheckpoints, unfinishedTest } from './diagnostics.mjs';
 import assert from 'node:assert/strict';
 import { validateTarget, validateExpectedBuildId } from './target.mjs';
 import { evaluateMatrix as evaluateRaw } from './matrix.mjs';
@@ -418,4 +422,99 @@ test('standard model test budgets allow the full app attempt and still leave rep
     if (saved === undefined) delete process.env.COMPAT_TEST_BUDGET_MS;
     else process.env.COMPAT_TEST_BUDGET_MS = saved;
   }
+});
+
+test('diagnostic deadlines and cleanup finish even when their operations never settle', { timeout: 3000 }, async () => {
+  let rejectLate;
+  const operation = new Promise((_, reject) => { rejectLate = reject; });
+  await assert.rejects(withDeadline(operation, 25, 'BROWSER_CDP_COMMAND_TIMEOUT'), /BROWSER_CDP_COMMAND_TIMEOUT/);
+  rejectLate(new Error('late private failure'));
+  assert.equal(await boundedCleanup(() => new Promise(() => {}), 25), false);
+  assert.equal(await boundedCleanup(() => Promise.reject(new Error('private cleanup failure')), 25), false);
+  assert.equal(await withDeadline(() => Promise.resolve('ready'), 25, 'TEST_TIMEOUT'), 'ready');
+});
+
+function controlledProgressContext() {
+  return { cellId: 'controlled-progress-' + process.pid, profileId: 'current', requestedSuite: 'smoke', suite: 'smoke',
+    harnessCommit: 'a'.repeat(40), expectedHarnessCommit: 'a'.repeat(40), runId: '17', runAttempt: '1' };
+}
+
+test('progress checkpoints omit private fields and reject stale workflow identities', () => {
+  const context = controlledProgressContext();
+  const raw = {
+    stage: 'runtime-version-context', buildId: 'controlled-build', identityVerified: true,
+    runtimeEnvironment: observedRuntime(createPlan('current').cells[5]),
+    models: { attempted: true, completed: false, privateText: 'secret' },
+    source: 'C:\\private\\movie.mp4', url: 'https://private.example.com?token=secret', error: 'private source stack',
+  };
+  const safe = progressForReport('media-smoke', raw, context);
+  assert.equal(JSON.stringify(safe).includes('private'), false);
+  assert.equal(JSON.stringify(safe).includes('secret'), false);
+  assert.equal(progressForReport('media-smoke', { stage: 'private-stage' }, context).stage, 'unknown');
+  try {
+    assert.equal(writeCheckpoint('media-smoke', raw, context), true);
+    assert.equal(readCheckpoint('media-smoke', context).stage, 'runtime-version-context');
+    assert.equal(readCheckpoint('media-smoke', { ...context, runAttempt: '2' }), null);
+    const recovered = unfinishedTest({ checkId: 'media-smoke', title: 'controlled' }, safe, 'timedout');
+    assert.notEqual(recovered.status, 'passed');
+    assert.equal(recovered.failure.code, 'TEST_TIMEOUT');
+    assert.equal(recovered.diagnostics.models.completed, false);
+  } finally { clearCheckpoints(context); }
+});
+
+test('reporter retains a discovered test and its last phase when no test-end event arrives', { timeout: 3000 }, async () => {
+  const context = controlledProgressContext();
+  const reporter = new SafeReporter();
+  reporter.context = context;
+  reporter.discovered = [{ id: 'controlled-test', checkId: 'media-smoke', title: 'Controlled interrupted test' }];
+  reporter.onError(new Error('TEST_TIMEOUT'));
+  try {
+    assert.equal(writeCheckpoint('media-smoke', {
+      stage: 'runtime-cdp-command', runtimeEnvironment: observedRuntime(createPlan('current').cells[5]),
+      models: { attempted: false, completed: false },
+    }, context), true);
+    await reporter.onEnd({ status: 'timedout', duration: 240000 });
+    const result = JSON.parse(readFileSync(path.resolve('reports/public', context.cellId + '.json'), 'utf8'));
+    assert.notEqual(result.status, 'passed');
+    assert.equal(result.tests.length, 1);
+    assert.equal(result.tests[0].failure.stage, 'runtime-cdp-command');
+    assert.equal(result.tests[0].diagnosticSource, 'checkpoint');
+    assert.equal(result.lifecycle.completedTests, 0);
+  } finally {
+    clearCheckpoints(context);
+    for (const extension of ['json', 'md', 'xml']) {
+      try { unlinkSync(path.resolve('reports/public', context.cellId + '.' + extension)); } catch {}
+    }
+  }
+});
+
+test('audio and browser startup failures keep fixed public codes without raw details', () => {
+  for (const [phrase, code] of [
+    ['CANNOT DECODE THE SOURCE AUDIO', 'AUDIO_DECODER_UNAVAILABLE'],
+    ['cannot encode the source audio', 'AUDIO_ENCODER_UNAVAILABLE'],
+    ['audio encoder could not be loaded', 'AUDIO_FALLBACK_UNAVAILABLE'],
+    ['source audio could not be included', 'AUDIO_TRACK_DROPPED'],
+    ['source audio could not be read', 'AUDIO_SOURCE_UNREADABLE'],
+    ['exported audio was empty or invalid', 'AUDIO_OUTPUT_EMPTY'],
+  ]) assert.equal(runtimeFailure(phrase + ' private details', 'EXPORT_FAILED'), code);
+  assert.deepEqual(publicFailure(new Error('browserType.launch: Timeout45000ms exceeded at private path')),
+    { code: 'BROWSER_LAUNCH_TIMEOUT', stage: 'browser-launch' });
+  assert.equal(publicFailure(new Error('OUTPUT_AUDIO_ALIGNMENT_MISMATCH private details')).code, 'OUTPUT_AUDIO_ALIGNMENT_MISMATCH');
+});
+
+test('early-failure attachments survive a null runtime environment', () => {
+  assert.equal(runtimeForReport(null).arch.browser, 'unknown');
+  const reporter = new SafeReporter();
+  reporter.context = controlledProgressContext();
+  const failure = { code: 'BROWSER_CDP_SESSION_TIMEOUT', stage: 'runtime-cdp-session' };
+  const savedLog = console.log;
+  try {
+    console.log = () => {};
+    reporter.onTestEnd({ title: 'Controlled early failure', expectedStatus: 'passed', location: { file: 'media.smoke.spec.mjs' } }, {
+      status: 'failed', duration: 5000, error: new Error('private details'),
+      attachments: [{ name: 'safe-diagnostics', body: Buffer.from(JSON.stringify({ stage: failure.stage, runtimeEnvironment: null, failure })) }],
+    });
+  } finally { console.log = savedLog; }
+  assert.equal(reporter.tests[0].diagnosticSource, 'attachment');
+  assert.deepEqual(reporter.tests[0].failure, failure);
 });

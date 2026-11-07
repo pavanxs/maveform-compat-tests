@@ -50,6 +50,8 @@ exportClip() uses the production decoding, reframing, caption rendering and expo
 
 For the smoke check, the harness requests source time 0.5–2.5 seconds with captions both off and on. The expected result is a 540×960 H.264/AAC MP4 containing the selected audio and video. Audio must not be silently removed.
 
+The synthetic source changes from 440 Hz to 880 Hz at 1 second and back to 440 Hz at 2 seconds. Independent PCM decoding must find those transitions at export times 0.5 and 1.5 seconds, within 10 ms, with the expected tone in each segment. Presented audio/video stream start times must be within 10 ms of zero and each other. AAC priming must not shift the selected sound; raw AAC packets may correctly have negative priming timestamps.
+
 The deterministic caption text is “Maveform compatibility”. It uses the production HORMOZI preset, centered at 78% of output height. Word timing divides the selected clip in half. The harness samples after fade-in and compares the caption band with a control band; the production no-face background is blurred video.
 
 ExportArtifact includes buildId, url, filename, bytes, mimeType, width, height, startS, endS, captions, audioMode and elapsedMs. The public report excludes url and filename.

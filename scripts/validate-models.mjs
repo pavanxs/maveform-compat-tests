@@ -48,6 +48,7 @@ export function validateCoreResult(result, fixture) {
 
 export async function runCoreModelCheck(compat, fixture) {
   compat.diagnostics.models = { attempted: true, completed: false };
+  compat.checkpoint?.();
   const result = await compat.call('runCoreModels', [], 'MODEL_RUN_FAILED');
   compat.checkIdentity(result.buildId);
   const verified = validateCoreResult(result, fixture);

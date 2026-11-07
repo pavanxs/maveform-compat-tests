@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { SMOKE_AUDIO_PATTERN } from './audio-alignment.mjs';
 import { mediaBinary, mediaVersion, runTool, probeMedia, requireMediaEncoders, requireSupportedMediaPlatform, speechAvailable } from './media-tools.mjs';
 
 const root = path.resolve('.generated');
@@ -39,10 +40,13 @@ try {
   runTool(mediaBinary('ffmpeg'), [
     '-hide_banner', '-loglevel', 'error', '-y',
     '-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24:duration=3',
-    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=3',
+    '-f', 'lavfi', '-i', 'aevalsrc=0.125*sin(2*PI*t*if(between(t\\,1\\,2)\\,880\\,440)):s=48000:d=3',
     ...encoding, '-t', '3', smoke,
   ]);
-  manifest.smoke = record(smoke, { fps: 24, toneHz: 440, modelsRun: false });
+  manifest.smoke = record(smoke, {
+    fps: 24, tonesHz: SMOKE_AUDIO_PATTERN.frequenciesHz,
+    audioTransitionsS: SMOKE_AUDIO_PATTERN.sourceTransitionsS, modelsRun: false,
+  });
 
   if (process.argv.includes('--speech')) {
     const speechText = [

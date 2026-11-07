@@ -1,4 +1,5 @@
 import os from 'node:os';
+import { withDeadline, boundedCleanup } from './diagnostics.mjs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -142,42 +143,70 @@ export function chromiumVersionArchitecture(value) {
   return { architecture: 'unknown', evidence: 'unknown' };
 }
 
-async function macChromiumArchitecture(browser) {
+async function macChromiumArchitecture(browser, probe) {
   let context;
+  const opening = Promise.resolve().then(() => browser.newContext({ locale: 'en-US' }));
   try {
-    context = await browser.newContext({ locale: 'en-US' });
-    const page = await context.newPage();
-    await page.goto('chrome://version/', { waitUntil: 'domcontentloaded', timeout: 10_000 });
-    // Do not read the command line or profile path elsewhere on this internal page.
-    return chromiumVersionArchitecture(await page.locator('#version').textContent({ timeout: 5_000 }));
-  } catch { return { architecture: 'unknown', evidence: 'unknown' }; }
-  finally { if (context) await context.close().catch(() => {}); }
+    probe.stage('runtime-version-context');
+    context = await withDeadline(opening, 5000, 'BROWSER_VERSION_CONTEXT_TIMEOUT');
+    probe.stage('runtime-version-page');
+    const page = await withDeadline(() => context.newPage(), 5000, 'BROWSER_VERSION_PAGE_TIMEOUT');
+    probe.stage('runtime-version-navigation');
+    await withDeadline(() => page.goto('chrome://version/', { waitUntil: 'domcontentloaded', timeout: 10_000 }), 11_000, 'BROWSER_VERSION_NAVIGATION_TIMEOUT');
+    probe.stage('runtime-version-read');
+    // Read only the CPU/version field. Never retain the command line or profile path.
+    const version = await withDeadline(() => page.locator('#version').textContent({ timeout: 5000 }), 6000, 'BROWSER_VERSION_READ_TIMEOUT');
+    return chromiumVersionArchitecture(version);
+  } catch (error) {
+    probe.error(typeof error?.code === 'string' && error.code.startsWith('BROWSER_') ? error.code : 'BROWSER_VERSION_PROBE_FAILED');
+    return { architecture: 'unknown', evidence: 'unknown' };
+  } finally {
+    if (context) {
+      if (!await boundedCleanup(() => context.close())) probe.error('DIAGNOSTIC_CLEANUP_TIMEOUT');
+    } else {
+      // A resource created after its deadline is closed without delaying the report.
+      void opening.then(late => boundedCleanup(() => late.close())).catch(() => {});
+    }
+  }
 }
 
-async function runningBrowserArchitecture(browser, channel) {
+async function runningBrowserArchitecture(browser, channel, probe) {
   let executable;
   if (browser.browserType().name() === 'chromium') {
     let session;
+    const opening = Promise.resolve().then(() => browser.newBrowserCDPSession());
     try {
-      session = await browser.newBrowserCDPSession();
-      const command = await session.send('Browser.getBrowserCommandLine');
+      probe.stage('runtime-cdp-session');
+      session = await withDeadline(opening, 5000, 'BROWSER_CDP_SESSION_TIMEOUT');
+      probe.stage('runtime-cdp-command');
+      const command = await withDeadline(() => session.send('Browser.getBrowserCommandLine'), 5000, 'BROWSER_CDP_COMMAND_TIMEOUT');
       executable = command.arguments?.[0]?.replace(/^"(.*)"$/, '$1');
-    } catch { /* Fall back to the exact selected channel's executable. */ }
-    finally { if (session) await session.detach().catch(() => {}); }
+    } catch (error) {
+      probe.error(typeof error?.code === 'string' && error.code.startsWith('BROWSER_') ? error.code : 'BROWSER_CDP_PROBE_FAILED');
+    } finally {
+      if (session) {
+        if (!await boundedCleanup(() => session.detach())) probe.error('DIAGNOSTIC_CLEANUP_TIMEOUT');
+      } else {
+        void opening.then(late => boundedCleanup(() => late.detach())).catch(() => {});
+      }
+    }
   }
+  probe.stage('runtime-binary-inspection');
   if (!executable) {
-    try { executable = resolveBrowserExecutable(channel); } catch { /* A native runtime probe can still identify a universal Mac Chrome. */ }
+    try { executable = resolveBrowserExecutable(channel); } catch { /* A Mac runtime probe can still identify a universal browser. */ }
   }
   const binary = executable ? inspectExecutableArchitecture(channel === 'webkit' ? webkitMachO(executable) : executable)
     : { architecture: 'unknown', evidence: 'unknown' };
   if (process.platform === 'darwin' && browser.browserType().name() === 'chromium' && ['universal', 'unknown'].includes(binary.architecture)) {
-    const runtime = await macChromiumArchitecture(browser);
+    const runtime = await macChromiumArchitecture(browser, probe);
     if (runtime.architecture !== 'unknown') return runtime;
   }
   return binary;
 }
 
-export async function collectRuntimeEnvironment({ browser = null, browserName = null, channel = null } = {}) {
+export async function collectRuntimeEnvironment({ browser = null, browserName = null, channel = null, onStage = () => {} } = {}) {
+  const probeErrors = [];
+  const probe = { stage: onStage, error: code => { if (!probeErrors.includes(code)) probeErrors.push(code); } };
   let host = hostArchitecture();
   let version = null;
   let product = null;
@@ -199,8 +228,10 @@ export async function collectRuntimeEnvironment({ browser = null, browserName = 
     } catch { /* Unobserved product/version must not pass a pinned-release check. */ }
   }
   const actualChannel = browser ? (channel || process.env.COMPAT_BROWSER || selectedBrowser()) : null;
-  const binary = browser ? await runningBrowserArchitecture(browser, actualChannel) : { architecture: 'unknown', evidence: 'unknown' };
+  const binary = browser ? await runningBrowserArchitecture(browser, actualChannel, probe) : { architecture: 'unknown', evidence: 'unknown' };
+  onStage('runtime-environment-ready');
   return {
+    probeErrorCodes: probeErrors,
     os: { platform: process.platform, release: safeText(os.release()), version, product },
     image: { os: safeText(process.env.ImageOS), version: safeText(process.env.ImageVersion) },
     arch: { host, node: normalizeArchitecture(process.arch), browser: binary.architecture, browserEvidence: binary.evidence },

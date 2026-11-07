@@ -1,4 +1,8 @@
 export const PUBLIC_ERROR_CODES = new Set([
+  'BROWSER_LAUNCH_TIMEOUT', 'BROWSER_CDP_SESSION_TIMEOUT', 'BROWSER_CDP_COMMAND_TIMEOUT', 'BROWSER_CDP_PROBE_FAILED',
+  'BROWSER_VERSION_CONTEXT_TIMEOUT', 'BROWSER_VERSION_PAGE_TIMEOUT', 'BROWSER_VERSION_NAVIGATION_TIMEOUT', 'BROWSER_VERSION_READ_TIMEOUT', 'BROWSER_VERSION_PROBE_FAILED',
+  'DIAGNOSTIC_CLEANUP_TIMEOUT', 'DIAGNOSTICS_INCOMPLETE', 'SNAPSHOT_TIMEOUT', 'CAPABILITY_PROBE_TIMEOUT',
+  'OUTPUT_AUDIO_ALIGNMENT_MISMATCH', 'AUDIO_DECODER_UNAVAILABLE', 'AUDIO_ENCODER_UNAVAILABLE', 'AUDIO_FALLBACK_UNAVAILABLE', 'AUDIO_TRACK_DROPPED', 'AUDIO_OUTPUT_EMPTY', 'AUDIO_SOURCE_UNREADABLE',
   'TARGET_REQUIRED', 'TARGET_INVALID', 'TARGET_INSECURE',
   'BUILD_ID_REQUIRED', 'BUILD_ID_INVALID', 'BUILD_ID_MISSING', 'BUILD_ID_MISMATCH',
   'BUILD_ID_CHANGED_DURING_RUN', 'NAVIGATION_FAILED', 'PREVIEW_ROUTE_UNAVAILABLE',
@@ -29,6 +33,7 @@ export const PUBLIC_ERROR_CODES = new Set([
 
 export function publicFailure(error, stage = 'unknown') {
   const raw = String(error?.message || error || '');
+  if (/browserType\.launch|browser\.launch/i.test(raw) && /timeout|timed out/i.test(raw)) return { code: 'BROWSER_LAUNCH_TIMEOUT', stage: 'browser-launch' };
   for (const code of PUBLIC_ERROR_CODES) {
     if (new RegExp('(?:^|[^A-Z0-9_])' + code + '(?:$|[^A-Z0-9_])').test(raw)) return { code, stage: safeLabel(stage) };
   }
@@ -37,6 +42,15 @@ export function publicFailure(error, stage = 'unknown') {
 
 export function runtimeFailure(error, fallback) {
   const raw = String(error?.message || error || '');
+  const lower = raw.toLowerCase();
+  for (const [phrase, code] of [
+    ['cannot decode the source audio', 'AUDIO_DECODER_UNAVAILABLE'],
+    ['cannot encode the source audio', 'AUDIO_ENCODER_UNAVAILABLE'],
+    ['audio encoder could not be loaded', 'AUDIO_FALLBACK_UNAVAILABLE'],
+    ['source audio could not be included', 'AUDIO_TRACK_DROPPED'],
+    ['source audio could not be read', 'AUDIO_SOURCE_UNREADABLE'],
+    ['exported audio was empty or invalid', 'AUDIO_OUTPUT_EMPTY'],
+  ]) if (lower.includes(phrase)) return code;
   if (fallback === 'MODEL_RUN_FAILED' && /couldn.t reach.*in time|ai tools took too long to get ready|load timeout|model.*timed out/i.test(raw)) return 'MODEL_LOAD_TIMEOUT';
   if (/VideoDecoder.*(not defined|unavailable|not supported)/i.test(raw)) return 'VIDEO_DECODER_UNAVAILABLE';
   if (/VideoEncoder.*(not defined|unavailable|not supported)/i.test(raw)) return 'VIDEO_ENCODER_UNAVAILABLE';
@@ -121,9 +135,11 @@ function systemText(value) {
   return typeof value === 'string' && /^[A-Za-z0-9 ._()+:-]{1,160}$/.test(value) ? value : null;
 }
 export function runtimeForReport(value = {}) {
+  value = value && typeof value === 'object' ? value : {};
   const arch = field => ['x64', 'arm64', 'ia32', 'universal', 'unknown'].includes(field) ? field : 'unknown';
   const browserChannels = ['chromium', 'chrome', 'msedge', 'webkit'];
   return {
+    probeErrorCodes: Array.isArray(value.probeErrorCodes) ? [...new Set(value.probeErrorCodes.filter(code => PUBLIC_ERROR_CODES.has(code)))] : [],
     os: {
       platform: ['linux', 'darwin', 'win32'].includes(value.os?.platform) ? value.os.platform : null,
       release: systemText(value.os?.release), version: systemText(value.os?.version), product: systemText(value.os?.product),

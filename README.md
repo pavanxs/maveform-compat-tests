@@ -4,9 +4,11 @@ This is a standalone public test harness. It opens an already deployed Maveform 
 
 ## What gets tested
 
-The default smoke check uses a generated 3-second video: moving test shapes, a 440 Hz tone, H.264 video and AAC audio. It uploads that fixture, decodes a frame in the browser, then exports a 2-second portrait clip twice through the app: captions off and captions on.
+The default smoke check uses a generated 3-second video: moving test shapes, tones that change from 440 to 880 and back to 440 Hz, H.264 video and AAC audio. It uploads that fixture, decodes a frame in the browser, then exports source time 0.5–2.5 seconds as a portrait clip twice: captions off and captions on.
 
 FFmpeg and ffprobe inspect the downloaded files independently. The test checks dimensions, codecs, duration, every decoded packet, moving/nonblank frames, preserved sound, and a localized caption change. A missing API, unavailable codec, failed export or missing runner is a failure, not a skipped pass.
+
+The sound changes at source times 1 and 2 seconds. Decoded export audio must place those changes at 0.5 and 1.5 seconds, within 10 ms. Audio and video stream timestamps must also start together near zero. These checks catch encoder delay, container offsets, and audio drift that a duration or loudness check would miss.
 
 The manual models suite also creates at least 30 seconds of computer-generated speech. It runs real transcription and Atlas embedding/clip finding, then checks recognized words, timing, complete sentence embedding coverage and actual clips. It does not claim to test face detection, scene detection or Genesis.
 

@@ -36,6 +36,7 @@ export default defineConfig({
     baseURL,
     acceptDownloads: true,
     headless: process.env.COMPAT_HEADED !== '1',
+    launchOptions: { timeout: 45_000 },
     navigationTimeout: 45_000,
     actionTimeout: 20_000,
     trace: localDebug ? 'retain-on-failure' : 'off',

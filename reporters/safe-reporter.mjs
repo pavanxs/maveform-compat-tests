@@ -5,15 +5,23 @@ import { publicFailure, safeBuildId, safeLabel, runtimeForReport } from '../scri
 import { createPlan, REQUIRED_CHECKS } from '../scripts/profiles.mjs';
 import { collectReportContext } from '../scripts/report-context.mjs';
 import { collectRuntimeEnvironment } from '../scripts/runtime-environment.mjs';
+import { checkIdForFile, clearCheckpoints, readCheckpoint, unfinishedTest } from '../scripts/diagnostics.mjs';
 
 const require = createRequire(import.meta.url);
 
 export default class SafeReporter {
   tests = [];
   globalErrors = [];
-  onBegin() {
+  discovered = [];
+  started = new Set();
+  context = null;
+  onBegin(config, suite) {
+    this.context = collectReportContext();
+    clearCheckpoints(this.context);
+    this.discovered = suite.allTests().map(test => ({ id: test.id, checkId: checkIdForFile(test.location.file), title: test.title }));
     console.log('Running ' + (process.env.COMPAT_SUITE || 'smoke') + ' compatibility checks; only sanitized diagnostics will be reported.');
   }
+  onTestBegin(test) { this.started.add(test.id); }
   onStdOut() {}
   onStdErr() {}
   onError(error) {
@@ -28,15 +36,35 @@ export default class SafeReporter {
         diagnostics.runtimeEnvironment = runtimeForReport(diagnostics.runtimeEnvironment);
       } catch { diagnostics = null; }
     }
-    const status = result.status === 'passed' && test.expectedStatus === 'passed' ? 'passed' : result.status === 'passed' ? 'unexpected' : result.status;
-    const failure = status === 'passed' ? null : (diagnostics?.failure || publicFailure(result.error, diagnostics?.stage || 'test-runner'));
-    const checkId = test.location.file.endsWith('media.smoke.spec.mjs') ? 'media-smoke' :
-      test.location.file.endsWith('core-models.spec.mjs') ? 'core-models' : 'unknown';
-    this.tests.push({ checkId, title: test.title, status, durationMs: result.duration, failure, diagnostics });
+    let status = result.status === 'passed' && test.expectedStatus === 'passed' ? 'passed' : result.status === 'passed' ? 'unexpected' : result.status;
+    const checkId = checkIdForFile(test.location.file);
+    let diagnosticSource = 'attachment';
+    if (!diagnostics) {
+      diagnostics = readCheckpoint(checkId, this.context) || readCheckpoint('worker', this.context);
+      diagnosticSource = 'checkpoint';
+      // A progress checkpoint alone can never certify a passing test.
+      if (status === 'passed') status = 'incomplete';
+    }
+    const failure = status === 'passed' ? null : status === 'incomplete'
+      ? { code: 'DIAGNOSTICS_INCOMPLETE', stage: diagnostics?.stage || 'test-runner' }
+      : (diagnostics?.failure || publicFailure(result.error, diagnostics?.stage || 'test-runner'));
+    this.tests.push({ checkId, title: test.title, status, durationMs: result.duration, failure, diagnostics, diagnosticSource });
     console.log(status.toUpperCase() + ': ' + test.title + (failure ? ' [' + failure.code + ' at ' + failure.stage + ']' : ''));
   }
   async onEnd(result) {
-    const context = collectReportContext();
+    const context = this.context || collectReportContext();
+    const completedCount = this.tests.length;
+    const workerProgress = readCheckpoint('worker', context);
+    for (const check of this.discovered) {
+      if (this.tests.some(test => test.checkId === check.checkId)) continue;
+      const progress = readCheckpoint(check.checkId, context) || workerProgress;
+      const unfinished = unfinishedTest(check, progress, result.status);
+      if (this.globalErrors[0]?.code) {
+        unfinished.failure.code = this.globalErrors[0].code;
+        if (unfinished.diagnostics) unfinished.diagnostics.failure = { ...unfinished.failure };
+      }
+      this.tests.push(unfinished);
+    }
     let planned = null;
     try { planned = createPlan(context.profileId, context.requestedSuite).cells.find(cell => cell.id === context.cellId); }
     catch { /* Local runs have no hosted profile. CI is checked below and by the aggregate. */ }
@@ -72,6 +100,7 @@ export default class SafeReporter {
         ...observed, playwright: require('@playwright/test/package.json').version,
       },
       tests: this.tests, frameworkErrors: this.globalErrors,
+      lifecycle: { discoveredTests: this.discovered.length, startedTests: this.started.size, completedTests: completedCount, workerStage: workerProgress?.stage || null },
       failureCode, failureStage: this.globalErrors[0]?.stage || (contextFailure ? 'report-identity' : null),
       completedAt: new Date().toISOString(),
     });

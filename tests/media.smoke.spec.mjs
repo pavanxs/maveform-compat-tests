@@ -10,12 +10,12 @@ test('synthetic video decodes and exports with real audio and rendered captions'
 
   const plain = await compat.export(false);
   compat.stage('external-validation-captions-off');
-  const plainMetrics = validateExport(plain.file);
+  const plainMetrics = validateExport(plain.file, { toneHz: null, verifyAudioAlignment: true });
   compat.diagnostics.exports.push({ captions: false, artifact: plain.artifact, inspected: plainMetrics });
 
   const captioned = await compat.export(true);
   compat.stage('external-validation-captions-on');
-  const captionMetrics = validateExport(captioned.file);
+  const captionMetrics = validateExport(captioned.file, { toneHz: null, verifyAudioAlignment: true });
   compat.diagnostics.exports.push({ captions: true, artifact: captioned.artifact, inspected: captionMetrics });
 
   compat.stage('caption-pixel-comparison');

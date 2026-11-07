@@ -13,6 +13,10 @@ export function writeCellReport(report) {
     '',
     '- Result: **' + markdownCell(report.status) + '**',
     '- Profile: ' + markdownCell(report.profileId),
+    ...(report.lifecycle ? [
+      '- Tests discovered / started / completed: ' + [report.lifecycle.discoveredTests, report.lifecycle.startedTests, report.lifecycle.completedTests].map(markdownCell).join(' / '),
+      '- Last worker phase: ' + markdownCell(report.lifecycle.workerStage),
+    ] : []),
     '- Requested suite / cell suite: ' + markdownCell(report.requestedSuite) + ' / ' + markdownCell(report.suite),
     '- Required checks: ' + (report.requiredChecks || []).map(markdownCell).join(', '),
     '- AI model scope: ' + markdownCell(report.modelScope) + (report.modelScopeReason ? ' (' + markdownCell(report.modelScopeReason) + ')' : ''),

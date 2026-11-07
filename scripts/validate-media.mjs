@@ -1,5 +1,6 @@
 import { statSync } from 'node:fs';
 import { mediaBinary, runTool, probeMedia } from './media-tools.mjs';
+import { validateAudioAlignment, validateStreamAlignment } from './audio-alignment.mjs';
 
 function requireCondition(condition, code) {
   if (!condition) throw new Error(code);
@@ -25,20 +26,22 @@ function meanDelta(a, b, start = 0) {
   return { meanAbsoluteDelta: total / (a.length - start), changedChannels: largeChanges };
 }
 
-function audioMetrics(file) {
+function audioMetrics(file, verifyAlignment) {
   const data = runTool(mediaBinary('ffmpeg'), [
     '-hide_banner', '-loglevel', 'error', '-i', file,
     '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-f', 's16le', 'pipe:1',
   ], { binary: true });
   const count = data.length / 2;
   requireCondition(Number.isInteger(count) && count > 16000, 'OUTPUT_AUDIO_TOO_SHORT');
+  const samples = new Float32Array(count);
+  for (let i = 0; i < count; i++) samples[i] = data.readInt16LE(i * 2) / 32768;
   let sum = 0;
   let crossings = 0;
   const start = Math.min(3200, Math.floor(count / 5));
   const end = count - start;
   let previous = 0;
   for (let i = start; i < end; i++) {
-    const sample = data.readInt16LE(i * 2) / 32768;
+    const sample = samples[i];
     sum += sample * sample;
     if ((sample >= 0) !== (previous >= 0)) crossings++;
     previous = sample;
@@ -47,10 +50,11 @@ function audioMetrics(file) {
     rms: Math.sqrt(sum / (end - start)),
     estimatedToneHz: crossings * 16000 / (2 * (end - start)),
     decodedDurationS: count / 16000,
+    ...(verifyAlignment ? { audioAlignment: validateAudioAlignment(samples, 16000) } : {}),
   };
 }
 
-export function validateExport(file, { expectedDurationS = 2, toneHz = 440 } = {}) {
+export function validateExport(file, { expectedDurationS = 2, toneHz = 440, verifyAudioAlignment = false } = {}) {
   const probe = probeMedia(file);
   const video = probe.streams?.find(stream => stream.codec_type === 'video');
   const audio = probe.streams?.find(stream => stream.codec_type === 'audio');
@@ -76,7 +80,10 @@ export function validateExport(file, { expectedDurationS = 2, toneHz = 440 } = {
   requireCondition(mean > 5 && brightFraction > 0.05, 'OUTPUT_FRAMES_BLANK');
   requireCondition(motion.meanAbsoluteDelta > 0.5, 'OUTPUT_FRAMES_FROZEN');
 
-  const sound = audioMetrics(file);
+  const sound = audioMetrics(file, verifyAudioAlignment);
+  if (verifyAudioAlignment) {
+    sound.audioAlignment.container = validateStreamAlignment(audio.start_time, video.start_time);
+  }
   requireCondition(sound.rms > 0.005 && sound.rms < 0.9, 'OUTPUT_AUDIO_SILENT_OR_CLIPPED');
   requireCondition(Math.abs(sound.decodedDurationS - expectedDurationS) <= 0.25, 'OUTPUT_AUDIO_DURATION_MISMATCH');
   if (toneHz !== null) requireCondition(Math.abs(sound.estimatedToneHz - toneHz) < 30, 'OUTPUT_AUDIO_TONE_MISMATCH');
