@@ -37,11 +37,21 @@ export function validateCoreResult(result, fixture) {
     ensure(result.optionalLanes?.[lane] === 'not-run', 'MODEL_OPTIONAL_LANE_MISREPORTED');
   }
   return {
-    run: true, wordCount: result.words.length, sentenceCount: result.sentences.length,
+    attempted: true, completed: true, wordCount: result.words.length, sentenceCount: result.sentences.length,
     embeddingCount: result.embeddingCount, clipCount: result.clips.length, matchedExpectedWords,
     coverage: { sentencesUnique: true, embeddingIdsUnique: true, sentencesCovered: sentenceIds.length },
     atlasDevice: ['wasm', 'webgpu'].includes(result.atlasDevice) ? result.atlasDevice : null,
     preferredTranscriptionDevice: ['wasm', 'webgpu'].includes(result.preferredTranscriptionDevice) ? result.preferredTranscriptionDevice : null,
     optionalLanes: { faceDetection: 'not-run', sceneDetection: 'not-run', genesis: 'not-run' },
   };
+}
+
+export async function runCoreModelCheck(compat, fixture) {
+  compat.diagnostics.models = { attempted: true, completed: false };
+  const result = await compat.call('runCoreModels', [], 'MODEL_RUN_FAILED');
+  compat.checkIdentity(result.buildId);
+  const verified = validateCoreResult(result, fixture);
+  ensure((await compat.snapshot()).models?.phase === 'ready', 'MODEL_RUN_FAILED');
+  compat.diagnostics.models = verified;
+  return verified;
 }

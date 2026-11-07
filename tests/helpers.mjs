@@ -4,6 +4,8 @@ import path from 'node:path';
 import {
   capabilitiesForReport, snapshotForReport, runtimeFailure, safeBuildId, publicFailure,
 } from '../scripts/report-utils.mjs';
+import { collectRuntimeEnvironment } from '../scripts/runtime-environment.mjs';
+import { collectReportContext } from '../scripts/report-context.mjs';
 
 export { expect };
 
@@ -26,8 +28,10 @@ export const test = base.extend({
     const diagnostics = {
       stage: 'opening', browserVersion: browser.version(), capabilities: null,
       snapshot: null, fixture: null, sourceBrowserDecode: null, exports: [],
-      captions: null, models: { run: false }, pageErrorCount: 0, consoleErrorCount: 0,
+      captions: null, models: { attempted: false, completed: false }, pageErrorCount: 0, consoleErrorCount: 0,
       failure: null, buildId: null, identityVerified: false,
+      runtimeEnvironment: await collectRuntimeEnvironment({ browser, channel: testInfo.project.use.channel || 'webkit' }),
+      reportContext: collectReportContext(),
     };
     page.on('pageerror', () => { diagnostics.pageErrorCount++; });
     page.on('console', message => { if (message.type() === 'error') diagnostics.consoleErrorCount++; });

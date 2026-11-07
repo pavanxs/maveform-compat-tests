@@ -1,4 +1,5 @@
 name: Browser compatibility
+run-name: Compatibility ${{ inputs.profile }} / ${{ inputs.suite }}
 
 on:
   workflow_dispatch:
@@ -11,8 +12,14 @@ on:
         description: Exact preview build ID; falls back to MAVEFORM_EXPECTED_BUILD_ID repository variable
         required: false
         type: string
+      profile:
+        description: Seven system groups, or the original six-browser baseline
+        required: true
+        default: current
+        type: choice
+        options: [current, older, newer, aliases, baseline]
       suite:
-        description: Smoke uses synthetic media only; models also runs real speech and Atlas models
+        description: Smoke uses synthetic media; models adds real speech/Atlas except on ubuntu-slim
         required: true
         default: smoke
         type: choice
@@ -22,109 +29,142 @@ permissions:
   contents: read
 
 concurrency:
-  group: compatibility-${{ github.ref }}-${{ inputs.suite }}
+  group: compatibility-${{ github.ref }}-${{ inputs.profile }}-${{ inputs.suite }}
   cancel-in-progress: false
 
 jobs:
-  browser:
-    name: ${{ matrix.id }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - id: mac-intel-chrome
-            runner: macos-15-intel
-            browser: chrome
-          - id: mac-intel-webkit
-            runner: macos-15-intel
-            browser: webkit
-          - id: mac-arm64-chrome
-            runner: macos-15
-            browser: chrome
-          - id: mac-arm64-webkit
-            runner: macos-15
-            browser: webkit
-          - id: windows-chrome
-            runner: windows-2025
-            browser: chrome
-          - id: windows-edge
-            runner: windows-2025
-            browser: msedge
+  plan:
+    name: Resolve the requested profile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
     env:
       MAVEFORM_BASE_URL: ${{ inputs.preview_url || vars.MAVEFORM_PREVIEW_URL }}
       MAVEFORM_EXPECTED_BUILD_ID: ${{ inputs.expected_build_id || vars.MAVEFORM_EXPECTED_BUILD_ID }}
-      COMPAT_SUITE: ${{ inputs.suite }}
-      COMPAT_BROWSER: ${{ matrix.browser }}
-      COMPAT_CELL_ID: ${{ matrix.id }}
-      COMPAT_RUNNER_LABEL: ${{ matrix.runner }}
+      COMPAT_PROFILE: ${{ inputs.profile }}
+      COMPAT_REQUESTED_SUITE: ${{ inputs.suite }}
+      COMPAT_HARNESS_COMMIT: ${{ github.sha }}
     steps:
-      # Official tag SHAs verified on 2026-11-07. Only this public repo is checked out.
+      # Verified official releases. Only this public harness repository is checked out.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Validate target, identities, and generate the matrix from shared profile data
+        id: plan
+        run: node scripts/plan.mjs
+
+  browser:
+    name: ${{ matrix.id }} / ${{ matrix.runner }}
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.jobTimeoutMinutes }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      MAVEFORM_BASE_URL: ${{ inputs.preview_url || vars.MAVEFORM_PREVIEW_URL }}
+      MAVEFORM_EXPECTED_BUILD_ID: ${{ inputs.expected_build_id || vars.MAVEFORM_EXPECTED_BUILD_ID }}
+      COMPAT_PROFILE: ${{ inputs.profile }}
+      COMPAT_REQUESTED_SUITE: ${{ inputs.suite }}
+      COMPAT_HARNESS_COMMIT: ${{ github.sha }}
+      COMPAT_SUITE: ${{ matrix.suite }}
+      COMPAT_BROWSER: ${{ matrix.browser }}
+      COMPAT_CELL_ID: ${{ matrix.id }}
+      COMPAT_RUNNER_LABEL: ${{ matrix.runner }}
+      COMPAT_TEST_BUDGET_MS: ${{ matrix.testBudgetMs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        id: checkout
+        timeout-minutes: ${{ matrix.slim && 1 || 3 }}
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        id: node
+        timeout-minutes: ${{ matrix.slim && 1 || 3 }}
+        with:
+          node-version: 24
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Run bounded slim setup and smoke
+        if: ${{ matrix.slim }}
+        id: slim
+        timeout-minutes: 11
+        run: node scripts/run-slim.mjs
       - name: Validate target and exact build ID
+        if: ${{ !matrix.slim }}
         id: target
         run: node scripts/target.mjs
       - name: Install public harness dependencies
+        if: ${{ !matrix.slim }}
         id: dependencies
+        timeout-minutes: 5
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Locate or install FFmpeg and ffprobe
+      - name: Locate or install media tools for the native platform
+        if: ${{ !matrix.slim }}
         id: tools
+        timeout-minutes: 5
         run: node scripts/setup-media.mjs
-      - name: Install the selected browser
+      - name: Prepare the native browser
+        if: ${{ !matrix.slim }}
         id: browser
-        shell: bash
-        run: node node_modules/@playwright/test/cli.js install "$COMPAT_BROWSER"
+        timeout-minutes: 5
+        run: node scripts/setup-browser.mjs
       - name: Generate only synthetic fixtures
+        if: ${{ !matrix.slim }}
         id: fixtures
-        shell: bash
-        run: |
-          if [ "$COMPAT_SUITE" = "models" ]; then
-            node scripts/generate-fixtures.mjs --speech
-          else
-            node scripts/generate-fixtures.mjs
-          fi
+        timeout-minutes: 3
+        run: node scripts/generate-fixtures.mjs ${{ matrix.suite == 'models' && '--speech' || '' }}
       - name: Run the deployed application checks
+        if: ${{ !matrix.slim }}
         id: tests
-        shell: bash
-        run: node scripts/run-tests.mjs "$COMPAT_SUITE"
+        timeout-minutes: ${{ matrix.testStepTimeoutMinutes }}
+        run: node scripts/run-tests.mjs ${{ matrix.suite }}
       - name: Record success, failure, or setup blocker
         if: always()
+        timeout-minutes: 1
         env:
+          COMPAT_CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          COMPAT_NODE_OUTCOME: ${{ steps.node.outcome }}
           COMPAT_TARGET_OUTCOME: ${{ steps.target.outcome }}
           COMPAT_DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
           COMPAT_TOOLS_OUTCOME: ${{ steps.tools.outcome }}
           COMPAT_BROWSER_OUTCOME: ${{ steps.browser.outcome }}
           COMPAT_FIXTURES_OUTCOME: ${{ steps.fixtures.outcome }}
           COMPAT_TEST_OUTCOME: ${{ steps.tests.outcome }}
+          COMPAT_SLIM_WORK_OUTCOME: ${{ steps.slim.outcome }}
         run: node scripts/record-cell.mjs
       - name: Upload only sanitized reports
         if: always()
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: compatibility-cell-${{ matrix.id }}
+          name: compatibility-cell-${{ inputs.profile }}-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: reports/public/
           if-no-files-found: error
           retention-days: 3
 
   matrix-report:
     name: Complete compatibility report
-    needs: browser
+    needs: [plan, browser]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
-      COMPAT_SUITE: ${{ inputs.suite }}
+      COMPAT_PROFILE: ${{ inputs.profile }}
+      COMPAT_REQUESTED_SUITE: ${{ inputs.suite }}
+      COMPAT_HARNESS_COMMIT: ${{ github.sha }}
       MAVEFORM_EXPECTED_BUILD_ID: ${{ inputs.expected_build_id || vars.MAVEFORM_EXPECTED_BUILD_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -132,16 +172,16 @@ jobs:
           package-manager-cache: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
-          pattern: compatibility-cell-*
+          pattern: compatibility-cell-${{ inputs.profile }}-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: reports/downloaded
-      - name: Report every requested runner, including missing cells
+      - name: Report every requested cell, including missing cells
         if: always()
         run: node scripts/matrix-report.mjs
       - name: Keep the combined report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
-          name: compatibility-matrix
+          name: compatibility-matrix-${{ inputs.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: reports/matrix/
           if-no-files-found: error
           retention-days: 3

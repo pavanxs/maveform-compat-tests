@@ -1,24 +1,56 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { validateTarget, validateExpectedBuildId } from './target.mjs';
-import { MATRIX, REQUIRED_CHECKS, evaluateMatrix as evaluateRaw } from './matrix.mjs';
+import { evaluateMatrix as evaluateRaw } from './matrix.mjs';
+import { createPlan, workflowMatrix, PROFILE_IDS } from './profiles.mjs';
 import { compareCaptionFrames } from './validate-media.mjs';
-import { validateCoreResult } from './validate-models.mjs';
-import { capabilitiesForReport, snapshotForReport, publicFailure } from './report-utils.mjs';
+import { validateCoreResult, runCoreModelCheck } from './validate-models.mjs';
+import { capabilitiesForReport, snapshotForReport, publicFailure, runtimeFailure, runtimeForReport } from './report-utils.mjs';
+import { executableArchitectureFromBuffer, selectedBrowser, normalizeArchitecture, chromiumVersionArchitecture, testBudgetMs } from './runtime-environment.mjs';
 
-const evaluateMatrix = (cells, suite = 'smoke') => evaluateRaw(cells, suite, 'sha-012345');
+function requestFor(suite = 'smoke', profileId = 'baseline') {
+  return { profileId, suite, expectedBuildId: 'sha-012345', harnessCommit: 'a'.repeat(40), runId: '17', runAttempt: '1' };
+}
+const evaluateMatrix = (cells, suite = 'smoke', profileId = 'baseline') => evaluateRaw(cells, requestFor(suite, profileId));
 
-function passingCells(suite = 'smoke') {
-  return MATRIX.map(cell => ({
-    cellId: cell.id, suite, status: 'passed', buildId: 'sha-012345',
-    expectedBuildId: 'sha-012345', identityVerified: true, runId: '17', runAttempt: '1',
-    environment: { arch: cell.arch, os: cell.os, browser: cell.browser, runner: cell.runner },
-    failureCode: null, frameworkErrors: [],
-    tests: REQUIRED_CHECKS[suite].map(checkId => ({
-      checkId, status: 'passed', failure: null,
-      diagnostics: { buildId: 'sha-012345', identityVerified: true },
-    })),
-  }));
+function observedRuntime(cell) {
+  const product = cell.release.product || (cell.os === 'linux' ? 'Ubuntu' : cell.os === 'darwin' ? 'macOS' : 'Windows Server 2025');
+  const version = cell.os === 'linux' ? (cell.release.version || '24.04') :
+    cell.os === 'darwin' ? (cell.release.version || '26') + '.0' :
+    '10.0.' + (cell.release.build || '26100');
+  const evidence = cell.os === 'linux' ? 'elf-' : cell.os === 'darwin' ? 'mach-o-' : 'pe-';
+  return {
+    os: { platform: cell.os, release: cell.os === 'linux' ? '6.8.0-azure' : cell.os === 'darwin' ? '25.0.0' : version, version, product },
+    image: { os: 'controlled-image', version: '20261107.1' },
+    arch: { host: cell.arch, node: cell.arch, browser: cell.arch, browserEvidence: evidence + cell.arch },
+    browser: { name: cell.browser === 'webkit' ? 'webkit' : 'chromium', channel: cell.browser, version: '156.0.1' },
+    node: { version: '24.10.0' },
+  };
+}
+function passingCells(suite = 'smoke', profileId = 'baseline') {
+  const request = requestFor(suite, profileId);
+  return createPlan(profileId, suite).cells.map(cell => {
+    const context = {
+      cellId: cell.id, profileId, requestedSuite: suite, suite: cell.suite,
+      harnessCommit: request.harnessCommit, expectedHarnessCommit: request.harnessCommit,
+      runId: request.runId, runAttempt: request.runAttempt,
+    };
+    return {
+      schemaVersion: 2, ...context, status: 'passed', buildId: request.expectedBuildId,
+      expectedBuildId: request.expectedBuildId, identityVerified: true,
+      requiredChecks: [...cell.checks], modelScope: cell.modelScope, modelScopeReason: cell.modelScopeReason,
+      environment: { runner: cell.runner, ...observedRuntime(cell) },
+      failureCode: null, frameworkErrors: [],
+      tests: cell.checks.map(checkId => ({
+        checkId, status: 'passed', failure: null,
+        diagnostics: {
+          buildId: request.expectedBuildId, identityVerified: true,
+          reportContext: { ...context }, runtimeEnvironment: observedRuntime(cell),
+          models: { attempted: checkId === 'core-models', completed: checkId === 'core-models' },
+        },
+      })),
+    };
+  });
 }
 
 test('CI needs HTTPS without credentials or URL-carried secrets', () => {
@@ -155,8 +187,8 @@ test('matrix rejects stale or forged identity flags and framework failures', () 
   const mismatchedExpected = passingCells();
   mismatchedExpected[0].expectedBuildId = 'wrong';
   assert.equal(evaluateMatrix(mismatchedExpected).status, 'failed');
-  assert.equal(evaluateRaw(passingCells(), 'smoke', 'different-requested-build').status, 'failed');
-  assert.equal(evaluateRaw(passingCells(), 'smoke').status, 'failed');
+  assert.equal(evaluateRaw(passingCells(), { ...requestFor(), expectedBuildId: 'different-requested-build' }).status, 'failed');
+  assert.equal(evaluateRaw(passingCells(), { ...requestFor(), expectedBuildId: null }).status, 'failed');
   for (const change of [
     cells => { cells[0].failureCode = 'EXPORT_FAILED'; },
     cells => { cells[0].frameworkErrors = [{ code: 'TEST_TIMEOUT' }]; },
@@ -177,4 +209,213 @@ test('models matrix requires both distinct checks and per-check build identity',
   const missingModelIdentity = passingCells('models');
   delete missingModelIdentity[1].tests[1].diagnostics;
   assert.equal(evaluateMatrix(missingModelIdentity, 'models').status, 'failed');
+});
+
+test('cold model-load timeouts are distinguished without exposing raw errors', () => {
+  const code = runtimeFailure("Couldn't reach the AI service in time. Please check your connection.", 'MODEL_RUN_FAILED');
+  assert.equal(code, 'MODEL_LOAD_TIMEOUT');
+  assert.equal(runtimeFailure('The AI tools took too long to get ready. Please check your connection and try again.', 'MODEL_RUN_FAILED'), 'MODEL_LOAD_TIMEOUT');
+  assert.deepEqual(publicFailure(new Error(code), 'real-core-models'), { code: 'MODEL_LOAD_TIMEOUT', stage: 'real-core-models' });
+});
+
+test('failed model calls and invalid results stay attempted but unfinished', async () => {
+  for (const call of [
+    async () => { throw new Error('MODEL_LOAD_TIMEOUT'); },
+    async () => ({ ...coreResult(), embeddedSentenceIds: ['s1'], embeddingCount: 1 }),
+  ]) {
+    const compat = {
+      diagnostics: { models: { attempted: false, completed: false } },
+      call,
+      checkIdentity() {},
+      async snapshot() { return { models: { phase: 'ready' } }; },
+    };
+    await assert.rejects(runCoreModelCheck(compat, speechInfo), /MODEL_LOAD_TIMEOUT|MODEL_EMBEDDINGS_INCOMPLETE/);
+    assert.deepEqual(compat.diagnostics.models, { attempted: true, completed: false });
+  }
+});
+
+test('the four OS profiles preserve all seven requested groups and exact runner labels', () => {
+  const expected = {
+    current: ['ubuntu-slim', 'ubuntu-24.04', 'windows-2025', 'ubuntu-24.04-arm', 'windows-11-arm', 'macos-26-intel', 'macos-26'],
+    older: ['ubuntu-slim', 'ubuntu-22.04', 'windows-2022', 'ubuntu-22.04-arm', 'windows-11-arm', 'macos-15-intel', 'macos-15'],
+    newer: ['ubuntu-slim', 'ubuntu-26.04', 'windows-2025-vs2026', 'ubuntu-26.04-arm', 'windows-11-vs2026-arm', 'macos-26-intel', 'xcode-27'],
+    aliases: ['ubuntu-slim', 'ubuntu-latest', 'windows-latest', 'ubuntu-24.04-arm', 'windows-11-arm', 'macos-26-intel', 'macos-latest'],
+  };
+  for (const [profileId, runners] of Object.entries(expected)) {
+    const plan = createPlan(profileId, 'models');
+    assert.deepEqual(plan.cells.map(cell => cell.runner), runners);
+    assert.equal(new Set(plan.cells.map(cell => cell.group)).size, 7);
+    assert.equal(plan.expectedSmokeChecks, 7);
+    assert.equal(plan.expectedModelChecks, 6);
+    assert.deepEqual(plan.cells[0].checks, ['media-smoke']);
+    assert.equal(plan.cells[0].modelScope, 'smoke-only');
+    assert.equal(plan.cells[0].modelScopeReason, 'SLIM_15_MINUTE_LIMIT');
+    assert.equal(plan.cells[0].jobTimeoutMinutes, 15);
+    assert.ok(plan.cells.slice(1).every(cell => cell.jobTimeoutMinutes === 40));
+    assert.deepEqual(workflowMatrix(plan).include.map(cell => [cell.id, cell.runner, cell.suite]),
+      plan.cells.map(cell => [cell.id, cell.runner, cell.suite]));
+  }
+});
+
+test('the browser baseline stays six cells while every profile verifies its declared checks', () => {
+  const baseline = createPlan('baseline', 'models');
+  assert.equal(baseline.expectedCells, 6);
+  assert.equal(baseline.expectedModelChecks, 6);
+  assert.deepEqual(baseline.cells.map(cell => cell.browser), ['chrome', 'webkit', 'chrome', 'webkit', 'chrome', 'msedge']);
+  for (const profileId of PROFILE_IDS) {
+    for (const suite of ['smoke', 'models']) {
+      assert.equal(evaluateMatrix(passingCells(suite, profileId), suite, profileId).status, 'passed');
+    }
+  }
+  assert.throws(() => createPlan('unlisted'), /PROFILE_INVALID/);
+  assert.throws(() => createPlan('current', 'unlisted'), /SUITE_INVALID/);
+});
+
+test('unexpected cells and wrong profile or check declarations cannot pass', () => {
+  for (const change of [
+    cells => { cells.push({ ...cells[0], cellId: 'unexpected-cell' }); },
+    cells => { cells[0].profileId = 'older'; },
+    cells => { cells[0].requestedSuite = 'smoke'; },
+    cells => { cells[0].suite = 'models'; },
+    cells => { cells[0].requiredChecks.push('core-models'); },
+    cells => { cells[1].tests.push({ ...cells[1].tests[0], checkId: 'unknown' }); },
+    cells => { cells[1].tests = [null]; },
+    cells => { cells[1].tests[1].diagnostics.models.completed = false; },
+  ]) {
+    const cells = passingCells('models', 'current');
+    change(cells);
+    assert.equal(evaluateMatrix(cells, 'models', 'current').status, 'failed');
+  }
+});
+
+test('exact harness commit and workflow attempt are required for every test and cell', () => {
+  for (const change of [
+    cells => { cells.forEach(cell => { cell.harnessCommit = 'b'.repeat(40); cell.expectedHarnessCommit = 'b'.repeat(40); }); },
+    cells => { cells.forEach(cell => { cell.runId = '999'; }); },
+    cells => { cells.forEach(cell => { cell.runAttempt = '2'; }); },
+    cells => { cells[0].tests[0].diagnostics.reportContext.harnessCommit = 'b'.repeat(40); },
+    cells => { cells[0].tests[0].diagnostics.reportContext.runId = '999'; },
+    cells => { delete cells[0].tests[0].diagnostics.reportContext; },
+  ]) {
+    const cells = passingCells();
+    change(cells);
+    assert.equal(evaluateMatrix(cells).status, 'failed');
+  }
+  const cells = passingCells();
+  for (const key of ['harnessCommit', 'runId', 'runAttempt']) {
+    assert.equal(evaluateRaw(cells, { ...requestFor(), [key]: null }).status, 'failed');
+  }
+  assert.equal(evaluateRaw(cells, requestFor(), 1).status, 'failed');
+});
+
+test('host, Node, and actual browser architectures must each match the requested native lane', () => {
+  for (const field of ['host', 'node', 'browser']) {
+    const cells = passingCells('smoke', 'current');
+    cells[4].environment.arch[field] = 'x64';
+    assert.equal(evaluateMatrix(cells, 'smoke', 'current').status, 'failed');
+  }
+  for (const arch of ['unknown', 'universal']) {
+    const cells = passingCells();
+    cells[0].environment.arch.browser = arch;
+    assert.equal(evaluateMatrix(cells).status, 'failed');
+  }
+  const missingPerTest = passingCells();
+  delete missingPerTest[0].tests[0].diagnostics.runtimeEnvironment;
+  assert.equal(evaluateMatrix(missingPerTest).status, 'failed');
+});
+
+test('pinned OS release and Windows product are verified instead of trusting a runner label', () => {
+  for (const [index, field, value] of [
+    [1, 'version', '22.04'], [5, 'version', '15.0'], [2, 'product', 'Microsoft Windows 11 Enterprise'],
+    [2, 'version', '10.0.20348'],
+  ]) {
+    const cells = passingCells('smoke', 'current');
+    cells[index].environment.os[field] = value;
+    assert.equal(evaluateMatrix(cells, 'smoke', 'current').status, 'failed');
+  }
+  const alias = passingCells('smoke', 'aliases');
+  alias[1].environment.os.version = '26.04';
+  alias[1].tests[0].diagnostics.runtimeEnvironment.os.version = '26.04';
+  assert.equal(evaluateMatrix(alias, 'smoke', 'aliases').status, 'passed');
+});
+
+test('runtime reports keep useful versions while removing paths and arbitrary secret fields', () => {
+  const value = runtimeForReport({
+    os: { platform: 'win32', release: '10.0.26100', version: '10.0.26100', product: 'Windows Server 2025' },
+    arch: { host: 'arm64', node: 'x64', browser: 'arm64', browserEvidence: 'pe-arm64' },
+    browser: { name: 'chromium', channel: 'msedge', version: '157.0.1', executable: 'C:\\private\\app.exe' },
+    image: { os: 'win11-arm64', version: 'https://private.example.com?token=secret' },
+    source: 'private', token: 'secret',
+  });
+  assert.equal(value.arch.node, 'x64');
+  assert.equal(value.os.product, 'Windows Server 2025');
+  assert.equal(value.image.version, null);
+  assert.equal(JSON.stringify(value).includes('private'), false);
+  assert.equal(JSON.stringify(value).includes('secret'), false);
+});
+
+test('native executable headers distinguish x64, ARM64 and mixed Mach-O binaries', () => {
+  for (const [machine, architecture, evidence] of [
+    [0x8664, 'x64', 'pe-x64'], [0xaa64, 'arm64', 'pe-arm64'],
+    [0xa641, 'arm64', 'pe-arm64ec'], [0xa64e, 'arm64', 'pe-arm64x'],
+  ]) {
+    const pe = Buffer.alloc(128);
+    pe.write('MZ'); pe.writeUInt32LE(64, 0x3c); pe.write('PE\0\0', 64); pe.writeUInt16LE(machine, 68);
+    assert.deepEqual(executableArchitectureFromBuffer(pe), { architecture, evidence });
+  }
+  for (const [machine, architecture] of [[62, 'x64'], [183, 'arm64']]) {
+    const elf = Buffer.alloc(64);
+    elf[0] = 0x7f; elf.write('ELF', 1); elf[5] = 1; elf.writeUInt16LE(machine, 18);
+    assert.deepEqual(executableArchitectureFromBuffer(elf), { architecture, evidence: 'elf-' + architecture });
+  }
+  const armMach = Buffer.alloc(64);
+  armMach.writeUInt32BE(0xcffaedfe, 0); armMach.writeUInt32LE(0x0100000c, 4);
+  assert.deepEqual(executableArchitectureFromBuffer(armMach), { architecture: 'arm64', evidence: 'mach-o-arm64' });
+  const universal = Buffer.alloc(64);
+  universal.writeUInt32BE(0xcafebabe, 0); universal.writeUInt32BE(2, 4);
+  universal.writeUInt32BE(0x01000007, 8); universal.writeUInt32BE(0x0100000c, 28);
+  assert.deepEqual(executableArchitectureFromBuffer(universal), { architecture: 'universal', evidence: 'mach-o-universal' });
+  assert.deepEqual(executableArchitectureFromBuffer(Buffer.alloc(8)), { architecture: 'unknown', evidence: 'unknown' });
+});
+
+test('Linux and Windows ARM choose supported native browsers and reject Chrome substitution', () => {
+  assert.equal(selectedBrowser(null, { platform: 'linux', host: 'arm64' }), 'chromium');
+  assert.equal(selectedBrowser(null, { platform: 'win32', host: 'arm64' }), 'msedge');
+  assert.throws(() => selectedBrowser('chrome', { platform: 'win32', host: 'arm64' }), /PLATFORM_MISMATCH/);
+  assert.throws(() => selectedBrowser('chrome', { platform: 'linux', host: 'arm64' }), /PLATFORM_MISMATCH/);
+  assert.equal(normalizeArchitecture('AMD64'), 'x64');
+  assert.equal(normalizeArchitecture('aarch64'), 'arm64');
+});
+
+test('Mac Chromium reports the running slice, including translated x64, without guessing from bitness', () => {
+  for (const suffix of ['(x86_64)', '(x86_64 translated)']) {
+    assert.deepEqual(chromiumVersionArchitecture('156.0.1 (Official Build) ' + suffix),
+      { architecture: 'x64', evidence: 'chromium-version-x64' });
+  }
+  assert.deepEqual(chromiumVersionArchitecture('156.0.1 (Official Build) (arm64)'),
+    { architecture: 'arm64', evidence: 'chromium-version-arm64' });
+  assert.deepEqual(chromiumVersionArchitecture('156.0.1 (64-bit)'),
+    { architecture: 'unknown', evidence: 'unknown' });
+});
+
+test('standard model test budgets allow the full app attempt and still leave reporter time', () => {
+  const saved = process.env.COMPAT_TEST_BUDGET_MS;
+  try {
+    delete process.env.COMPAT_TEST_BUDGET_MS;
+    assert.equal(testBudgetMs('models'), 900_000);
+    assert.equal(testBudgetMs('smoke'), 240_000);
+    const plan = createPlan('current', 'models');
+    assert.equal(plan.cells[0].testBudgetMs, 240_000);
+    for (const cell of plan.cells.slice(1)) {
+      assert.equal(cell.testBudgetMs, 900_000);
+      assert.equal(cell.testStepTimeoutMinutes, 16);
+    }
+    process.env.COMPAT_TEST_BUDGET_MS = '900000';
+    assert.equal(testBudgetMs('models'), 900_000);
+    process.env.COMPAT_TEST_BUDGET_MS = '900001';
+    assert.throws(() => testBudgetMs('models'), /TEST_BUDGET_INVALID/);
+  } finally {
+    if (saved === undefined) delete process.env.COMPAT_TEST_BUDGET_MS;
+    else process.env.COMPAT_TEST_BUDGET_MS = saved;
+  }
 });

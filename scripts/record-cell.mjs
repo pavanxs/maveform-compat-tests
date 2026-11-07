@@ -1,45 +1,71 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { writeCellReport } from './cell-report.mjs';
-import { safeBuildId, safeLabel } from './report-utils.mjs';
+import { safeBuildId, safeLabel, runtimeForReport, PUBLIC_ERROR_CODES } from './report-utils.mjs';
+import { createPlan, REQUIRED_CHECKS } from './profiles.mjs';
+import { collectReportContext } from './report-context.mjs';
+import { collectRuntimeEnvironment } from './runtime-environment.mjs';
 
-const cellId = safeLabel(process.env.COMPAT_CELL_ID || 'local-' + process.platform + '-' + process.arch);
-const reportPath = path.resolve('reports/public', cellId + '.json');
+const context = collectReportContext();
+let planned = null;
+try { planned = createPlan(context.profileId, context.requestedSuite).cells.find(cell => cell.id === context.cellId); } catch {}
+const reportPath = path.resolve('reports/public', context.cellId + '.json');
 const stages = [
-  ['target', 'COMPAT_TARGET_OUTCOME'],
-  ['dependencies', 'COMPAT_DEPENDENCIES_OUTCOME'],
-  ['media-tools', 'COMPAT_TOOLS_OUTCOME'],
-  ['browser-install', 'COMPAT_BROWSER_OUTCOME'],
-  ['fixtures', 'COMPAT_FIXTURES_OUTCOME'],
-  ['tests', 'COMPAT_TEST_OUTCOME'],
+  ['checkout', 'COMPAT_CHECKOUT_OUTCOME'], ['node-setup', 'COMPAT_NODE_OUTCOME'],
+  ['target', 'COMPAT_TARGET_OUTCOME'], ['dependencies', 'COMPAT_DEPENDENCIES_OUTCOME'],
+  ['media-tools', 'COMPAT_TOOLS_OUTCOME'], ['browser-install', 'COMPAT_BROWSER_OUTCOME'],
+  ['fixtures', 'COMPAT_FIXTURES_OUTCOME'], ['tests', 'COMPAT_TEST_OUTCOME'], ['slim-work', 'COMPAT_SLIM_WORK_OUTCOME'],
 ];
-const failedStage = stages.find(([, variable]) => ['failure', 'cancelled'].includes(process.env[variable]));
+let failedStage = stages.find(([, variable]) => ['failure', 'cancelled'].includes(process.env[variable]))?.[0];
+let slimStatus = null;
+if (process.env.COMPAT_RUNNER_LABEL === 'ubuntu-slim') {
+  try {
+    const value = JSON.parse(readFileSync(path.resolve('reports/internal/slim-stage.json'), 'utf8'));
+    slimStatus = {
+      stage: safeLabel(value.stage), status: safeLabel(value.status),
+      code: PUBLIC_ERROR_CODES.has(value.code) ? value.code : null,
+      elapsedMs: Number.isFinite(value.elapsedMs) ? value.elapsedMs : null,
+      exitCode: Number.isInteger(value.exitCode) ? value.exitCode : null,
+      dependencyCode: /^E[A-Z0-9_]+$/.test(value.dependencyCode || '') ? value.dependencyCode : null,
+    };
+    if (slimStatus.status !== 'passed') failedStage = slimStatus.stage;
+  } catch { /* A hard step timeout still produces a fallback cell report. */ }
+}
 let report;
+let readFailure = null;
 if (existsSync(reportPath)) {
-  report = JSON.parse(readFileSync(reportPath, 'utf8'));
+  try {
+    report = JSON.parse(readFileSync(reportPath, 'utf8'));
+    if (report.schemaVersion !== 2 || Object.entries(context).some(([key, value]) => report[key] !== value)) {
+      readFailure = 'REPORT_IDENTITY_MISMATCH';
+      report = null;
+    }
+  } catch { readFailure = 'REPORT_SCHEMA_INVALID'; }
+}
+if (report) {
   if (failedStage && report.status === 'passed') {
     report.status = 'failed';
-    report.failureCode = 'SETUP_FAILED';
-    report.failureStage = failedStage[0];
+    report.failureCode = slimStatus?.code || 'SETUP_FAILED';
+    report.failureStage = failedStage;
   }
 } else {
   report = {
-    schemaVersion: 1, cellId,
-    runId: process.env.GITHUB_RUN_ID || 'local',
-    runAttempt: process.env.GITHUB_RUN_ATTEMPT || '1',
-    suite: process.env.COMPAT_SUITE || 'smoke',
+    schemaVersion: 2, ...context,
+    requiredChecks: planned?.checks || REQUIRED_CHECKS[context.suite],
+    modelScope: planned?.modelScope || (context.suite === 'models' ? 'required' : 'not-requested'),
+    modelScopeReason: planned?.modelScopeReason || null,
     status: 'setup-failed', buildId: null,
     expectedBuildId: safeBuildId(process.env.MAVEFORM_EXPECTED_BUILD_ID?.trim()),
-    identityVerified: false, durationMs: null, tests: [],
+    identityVerified: false, durationMs: null, tests: [], frameworkErrors: [],
     environment: {
-      runner: process.env.COMPAT_RUNNER_LABEL || 'local', os: process.platform,
-      osRelease: os.release(), arch: process.arch, node: process.version,
-      browser: process.env.COMPAT_BROWSER || 'unknown', imageVersion: process.env.ImageVersion || null,
+      runner: safeLabel(process.env.COMPAT_RUNNER_LABEL || 'local'),
+      ...runtimeForReport(await collectRuntimeEnvironment()),
     },
-    failureCode: 'SETUP_FAILED', failureStage: failedStage?.[0] || 'before-test-report',
+    failureCode: readFailure || slimStatus?.code || 'SETUP_FAILED',
+    failureStage: failedStage || 'before-test-report',
     completedAt: new Date().toISOString(),
   };
 }
+if (slimStatus) report.setup = slimStatus;
 writeCellReport(report);
 console.log('Saved sanitized cell status: ' + report.cellId + ' = ' + report.status);

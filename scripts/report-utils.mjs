@@ -12,12 +12,19 @@ export const PUBLIC_ERROR_CODES = new Set([
   'OUTPUT_DURATION_MISMATCH', 'OUTPUT_FILE_TOO_SMALL', 'OUTPUT_FRAME_DECODE_FAILED',
   'OUTPUT_FRAMES_BLANK', 'OUTPUT_FRAMES_FROZEN', 'OUTPUT_AUDIO_TOO_SHORT',
   'OUTPUT_AUDIO_SILENT_OR_CLIPPED', 'OUTPUT_AUDIO_DURATION_MISMATCH', 'OUTPUT_AUDIO_TONE_MISMATCH',
-  'CAPTIONS_NOT_VISIBLE_IN_EXPORT', 'MODEL_RUN_FAILED', 'MODEL_DOWNLOAD_FAILED',
+  'CAPTIONS_NOT_VISIBLE_IN_EXPORT', 'MODEL_RUN_FAILED', 'MODEL_DOWNLOAD_FAILED', 'MODEL_LOAD_TIMEOUT',
   'MODEL_SPEECH_NOT_RECOGNIZED', 'MODEL_TIMESTAMPS_INVALID', 'MODEL_EMBEDDINGS_MISSING',
   'MODEL_CLIPS_MISSING', 'MODEL_RESULT_INVALID', 'MODEL_EMBEDDINGS_INCOMPLETE', 'MODEL_SENTENCE_IDS_INVALID', 'MODEL_OPTIONAL_LANE_MISREPORTED',
   'TEST_TIMEOUT', 'TEST_INTERRUPTED', 'UNCLASSIFIED_FAILURE', 'SETUP_FAILED',
   'EXPECTED_TESTS_NOT_PASSED', 'CELL_REPORT_MISSING', 'RUNNER_ARCHITECTURE_MISMATCH',
   'MEDIA_TOOLS_MISSING', 'SPEECH_FIXTURE_UNAVAILABLE', 'SPEECH_FIXTURE_INVALID',
+  'PROFILE_INVALID', 'SUITE_INVALID', 'HARNESS_ID_REQUIRED', 'HARNESS_ID_MISMATCH', 'WORKFLOW_ID_INVALID',
+  'REPORT_IDENTITY_MISMATCH', 'REPORT_SCHEMA_INVALID', 'BROWSER_IDENTITY_MISMATCH',
+  'RUNNER_ENVIRONMENT_MISMATCH', 'RUNNER_OS_VERSION_MISMATCH', 'RUNNER_OS_PRODUCT_MISMATCH',
+  'PLATFORM_UNSUPPORTED', 'PLATFORM_MISMATCH', 'BROWSER_INVALID', 'BROWSER_INSTALL_FAILED',
+  'BROWSER_EXECUTABLE_MISSING', 'BROWSER_ARCHITECTURE_UNKNOWN', 'BROWSER_ARCHITECTURE_MISMATCH',
+  'MEDIA_DEPENDENCY_UNSUPPORTED', 'SLIM_TIME_BUDGET_EXCEEDED', 'FRAMEWORK_ERROR',
+  'MEDIA_ENCODER_UNAVAILABLE', 'TEST_BUDGET_INVALID', 'TEST_RUNNER_FAILED', 'MODEL_SCOPE_MISMATCH',
 ]);
 
 export function publicFailure(error, stage = 'unknown') {
@@ -30,6 +37,7 @@ export function publicFailure(error, stage = 'unknown') {
 
 export function runtimeFailure(error, fallback) {
   const raw = String(error?.message || error || '');
+  if (fallback === 'MODEL_RUN_FAILED' && /couldn.t reach.*in time|ai tools took too long to get ready|load timeout|model.*timed out/i.test(raw)) return 'MODEL_LOAD_TIMEOUT';
   if (/VideoDecoder.*(not defined|unavailable|not supported)/i.test(raw)) return 'VIDEO_DECODER_UNAVAILABLE';
   if (/VideoEncoder.*(not defined|unavailable|not supported)/i.test(raw)) return 'VIDEO_ENCODER_UNAVAILABLE';
   if (/(avc|h264|h\.264).*(unsupported|not supported|unavailable)/i.test(raw)) return 'H264_ENCODE_UNAVAILABLE';
@@ -107,4 +115,29 @@ export function markdownCell(value) {
 export function xml(value) {
   return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+function systemText(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9 ._()+:-]{1,160}$/.test(value) ? value : null;
+}
+export function runtimeForReport(value = {}) {
+  const arch = field => ['x64', 'arm64', 'ia32', 'universal', 'unknown'].includes(field) ? field : 'unknown';
+  const browserChannels = ['chromium', 'chrome', 'msedge', 'webkit'];
+  return {
+    os: {
+      platform: ['linux', 'darwin', 'win32'].includes(value.os?.platform) ? value.os.platform : null,
+      release: systemText(value.os?.release), version: systemText(value.os?.version), product: systemText(value.os?.product),
+    },
+    image: { os: systemText(value.image?.os), version: systemText(value.image?.version) },
+    arch: {
+      host: arch(value.arch?.host), node: arch(value.arch?.node), browser: arch(value.arch?.browser),
+      browserEvidence: systemText(value.arch?.browserEvidence),
+    },
+    browser: {
+      name: ['chromium', 'webkit'].includes(value.browser?.name) ? value.browser.name : null,
+      channel: browserChannels.includes(value.browser?.channel) ? value.browser.channel : null,
+      version: systemText(value.browser?.version),
+    },
+    node: { version: systemText(value.node?.version) },
+  };
 }

@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
-import os from 'node:os';
 import { createRequire } from 'node:module';
 import { writeCellReport } from '../scripts/cell-report.mjs';
-import { publicFailure, safeBuildId, safeLabel } from '../scripts/report-utils.mjs';
+import { publicFailure, safeBuildId, safeLabel, runtimeForReport } from '../scripts/report-utils.mjs';
+import { createPlan, REQUIRED_CHECKS } from '../scripts/profiles.mjs';
+import { collectReportContext } from '../scripts/report-context.mjs';
+import { collectRuntimeEnvironment } from '../scripts/runtime-environment.mjs';
 
 const require = createRequire(import.meta.url);
 
@@ -23,7 +25,8 @@ export default class SafeReporter {
     if (attachment) {
       try {
         diagnostics = JSON.parse(attachment.body ? attachment.body.toString('utf8') : readFileSync(attachment.path, 'utf8'));
-      } catch { /* Missing diagnostics cannot turn a failed test into a pass. */ }
+        diagnostics.runtimeEnvironment = runtimeForReport(diagnostics.runtimeEnvironment);
+      } catch { diagnostics = null; }
     }
     const status = result.status === 'passed' && test.expectedStatus === 'passed' ? 'passed' : result.status === 'passed' ? 'unexpected' : result.status;
     const failure = status === 'passed' ? null : (diagnostics?.failure || publicFailure(result.error, diagnostics?.stage || 'test-runner'));
@@ -32,35 +35,45 @@ export default class SafeReporter {
     this.tests.push({ checkId, title: test.title, status, durationMs: result.duration, failure, diagnostics });
     console.log(status.toUpperCase() + ': ' + test.title + (failure ? ' [' + failure.code + ' at ' + failure.stage + ']' : ''));
   }
-  onEnd(result) {
+  async onEnd(result) {
+    const context = collectReportContext();
+    let planned = null;
+    try { planned = createPlan(context.profileId, context.requestedSuite).cells.find(cell => cell.id === context.cellId); }
+    catch { /* Local runs have no hosted profile. CI is checked below and by the aggregate. */ }
+    const requiredChecks = planned?.checks || REQUIRED_CHECKS[context.suite];
+    const checkIds = this.tests.map(test => test.checkId);
+    const checksComplete = checkIds.length === requiredChecks.length && new Set(checkIds).size === checkIds.length &&
+      requiredChecks.every(check => checkIds.includes(check));
     const ids = new Set(this.tests.map(test => test.diagnostics?.buildId).filter(Boolean));
     const buildId = ids.size === 1 ? [...ids][0] : null;
     const expected = safeBuildId(process.env.MAVEFORM_EXPECTED_BUILD_ID?.trim());
-    const suite = process.env.COMPAT_SUITE || 'smoke';
-    const expectedTests = suite === 'models' ? 2 : 1;
-    const allPassed = result.status === 'passed' && this.tests.length === expectedTests &&
-      this.tests.every(test => test.status === 'passed') && this.globalErrors.length === 0;
-    const report = {
-      schemaVersion: 1,
-      cellId: safeLabel(process.env.COMPAT_CELL_ID || 'local-' + process.platform + '-' + process.arch + '-' + (process.env.COMPAT_BROWSER || 'chrome')),
-      runId: process.env.GITHUB_RUN_ID || 'local',
-      runAttempt: process.env.GITHUB_RUN_ATTEMPT || '1',
-      suite, status: allPassed ? 'passed' : result.status === 'passed' ? 'incomplete' : result.status,
-      buildId, expectedBuildId: expected, identityVerified: Boolean(expected && buildId === expected),
+    const identityVerified = Boolean(expected && buildId === expected && this.tests.length > 0 &&
+      this.tests.every(test => test.diagnostics?.buildId === expected && test.diagnostics?.identityVerified === true));
+    const contextFailure = process.env.CI && !planned ? 'PROFILE_INVALID' :
+      process.env.CI && (!context.expectedHarnessCommit || context.harnessCommit !== context.expectedHarnessCommit) ? 'HARNESS_ID_MISMATCH' : null;
+    const failureCode = contextFailure || (ids.size > 1 ? 'BUILD_ID_CHANGED_DURING_RUN' : null) ||
+      (process.env.CI && result.status === 'passed' && !identityVerified ? 'BUILD_ID_MISMATCH' : null) ||
+      this.globalErrors[0]?.code || (!checksComplete ? 'EXPECTED_TESTS_NOT_PASSED' : null);
+    const allPassed = result.status === 'passed' && checksComplete &&
+      this.tests.every(test => test.status === 'passed') && !failureCode &&
+      (!process.env.CI || identityVerified);
+    const observed = this.tests.map(test => test.diagnostics?.runtimeEnvironment).find(value => value?.browser?.version) ||
+      runtimeForReport(await collectRuntimeEnvironment());
+    writeCellReport({
+      schemaVersion: 2, ...context,
+      requiredChecks: [...requiredChecks],
+      modelScope: planned?.modelScope || (context.suite === 'models' ? 'required' : 'not-requested'),
+      modelScopeReason: planned?.modelScopeReason || null,
+      status: allPassed ? 'passed' : result.status === 'passed' ? 'incomplete' : result.status,
+      buildId, expectedBuildId: expected, identityVerified,
       durationMs: result.duration,
       environment: {
-        runner: process.env.COMPAT_RUNNER_LABEL || 'local',
-        os: process.platform, osRelease: os.release(), arch: process.arch,
-        node: process.version, playwright: require('@playwright/test/package.json').version,
-        browser: process.env.COMPAT_BROWSER || 'chrome',
-        imageVersion: process.env.ImageVersion || null,
+        runner: safeLabel(process.env.COMPAT_RUNNER_LABEL || 'local'),
+        ...observed, playwright: require('@playwright/test/package.json').version,
       },
       tests: this.tests, frameworkErrors: this.globalErrors,
-      failureCode: ids.size > 1 ? 'BUILD_ID_CHANGED_DURING_RUN' :
-        this.globalErrors[0]?.code || (this.tests.length !== expectedTests ? 'EXPECTED_TESTS_NOT_PASSED' : null),
-      failureStage: this.globalErrors[0]?.stage || null,
+      failureCode, failureStage: this.globalErrors[0]?.stage || (contextFailure ? 'report-identity' : null),
       completedAt: new Date().toISOString(),
-    };
-    writeCellReport(report);
+    });
   }
 }

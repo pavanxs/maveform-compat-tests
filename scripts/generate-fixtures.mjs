@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { mediaBinary, mediaVersion, runTool, probeMedia } from './media-tools.mjs';
+import { mediaBinary, mediaVersion, runTool, probeMedia, requireMediaEncoders, requireSupportedMediaPlatform, speechAvailable } from './media-tools.mjs';
 
 const root = path.resolve('.generated');
 mkdirSync(root, { recursive: true });
@@ -33,6 +33,8 @@ function record(file, extra = {}) {
 }
 
 try {
+  requireSupportedMediaPlatform();
+  requireMediaEncoders();
   const smoke = path.join(root, 'synthetic-smoke.mp4');
   runTool(mediaBinary('ffmpeg'), [
     '-hide_banner', '-loglevel', 'error', '-y',
@@ -54,6 +56,7 @@ try {
     writeFileSync(textPath, speechText + '\n');
     let audioPath;
     let synthesizer;
+    if (!speechAvailable()) throw new Error('SPEECH_FIXTURE_UNAVAILABLE');
     if (process.platform === 'darwin') {
       audioPath = path.join(root, 'synthetic-speech.aiff');
       runTool('/usr/bin/say', ['-r', '145', '-f', textPath, '-o', audioPath]);
@@ -66,8 +69,12 @@ try {
         '-InputText', textPath, '-OutputAudio', audioPath,
       ]);
       synthesizer = 'Windows system speech';
+    } else if (process.platform === 'linux') {
+      audioPath = path.join(root, 'synthetic-speech.wav');
+      runTool('espeak-ng', ['-v', 'en-us', '-s', '145', '-f', textPath, '-w', audioPath]);
+      synthesizer = 'eSpeak NG English';
     } else {
-      throw new Error('SPEECH_FIXTURE_UNAVAILABLE: The manual model lane supports macOS and Windows system speech.');
+      throw new Error('SPEECH_FIXTURE_UNAVAILABLE');
     }
     const spokenDuration = Number(probeMedia(audioPath).format.duration);
     if (!Number.isFinite(spokenDuration) || spokenDuration < 15 || spokenDuration > 70) {

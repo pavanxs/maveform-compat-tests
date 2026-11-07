@@ -98,3 +98,9 @@ preferredTranscriptionDevice describes the preferred capability path; it does no
 Every snapshot and result carries the same buildId. CI checks it against the required expected build ID. A missing facade, wrong revision, unsupported export codec or failed worker is reported as a failure with a stage and code.
 
 The deterministic export lane requires export capabilities. The real core-model lane runs separately so that unavailable video encoding does not prevent testing actual audio/CPU fallback behavior.
+
+The public harness additionally records its own commit, selected runner profile, requested suite, effective per-cell suite, planned checks, and workflow run/attempt. These values must match across the selected matrix. The application does not choose which cells passed or which checks were planned.
+
+Seven-group profiles plan one media smoke check per group. When models is selected, six groups also run core models; ubuntu-slim explicitly plans media smoke only because of its 15-minute job limit. A runtime skip, missing setup, unavailable codec or unfinished model attempt cannot substitute for a planned successful check.
+
+Runner evidence distinguishes the host architecture, Node architecture and browser executable architecture. Requested runner labels alone are not evidence of an OS release or native ARM browser. The report checks observed releases for fixed OS labels and records the actual image behind rolling labels.
