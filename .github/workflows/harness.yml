@@ -11,6 +11,12 @@ on:
         required: false
         default: false
         type: boolean
+      intel_download_pair:
+        description: Compare click waiting, or headless versus headed with normal clicks
+        required: false
+        default: click-wait
+        type: choice
+        options: [click-wait, window-mode]
 
 permissions:
   contents: read
@@ -39,7 +45,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        click_mode: [normal, no-wait-after]
+        click_mode: ${{ fromJSON(inputs.intel_download_pair == 'window-mode' && '["normal","headed"]' || '["normal","no-wait-after"]') }}
     env:
       COMPAT_BROWSER: chrome
       INTEL_DOWNLOAD_MODE: ${{ matrix.click_mode }}

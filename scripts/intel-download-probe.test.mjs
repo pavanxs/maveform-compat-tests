@@ -29,7 +29,7 @@ function sample(mode = 'normal') {
   } };
 }
 
-for (const mode of ['normal', 'no-wait-after']) {
+for (const mode of ['normal', 'no-wait-after', 'headed']) {
   test('synthetic ' + mode + ' requires click, real save, completion and exact content', async () => {
     const item = sample(mode);
     await exerciseDownload(item.options);
@@ -140,8 +140,8 @@ test('failed context creation is distinct from a timeout and any late context is
   assert.doesNotMatch(JSON.stringify(publicProbeReport(broken)), /secret path/);
 });
 
-function passedState() {
-  const state = newProbeState('normal', identity);
+function passedState(mode = 'normal') {
+  const state = newProbeState(mode, identity);
   state.environment = {
     os: { platform: 'darwin', version: '26.6.1', release: '25.6.0', product: 'macOS' },
     image: { os: 'macos26', version: '20260824.0517.1' },
@@ -154,6 +154,20 @@ function passedState() {
   state.cleanup = { context: true, browser: true, server: true };
   return state;
 }
+
+test('window-mode reports differ only in the mode label and headless setting', () => {
+  const normal = publicProbeReport(passedState('normal'));
+  const headed = publicProbeReport(passedState('headed'));
+  assert.equal(normal.status, 'passed');
+  assert.equal(headed.status, 'passed');
+  assert.equal(normal.settings.headless, true);
+  assert.equal(headed.settings.headless, false);
+  assert.equal(normal.settings.noWaitAfter, false);
+  assert.equal(headed.settings.noWaitAfter, false);
+  assert.deepEqual(headed, {
+    ...normal, mode: 'headed', settings: { ...normal.settings, headless: false },
+  });
+});
 
 test('a public success requires every evidence gate and valid native runner identity', () => {
   assert.equal(publicProbeReport(passedState()).status, 'passed');

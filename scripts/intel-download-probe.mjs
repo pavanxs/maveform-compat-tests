@@ -10,7 +10,7 @@ import { downloadForReport, runtimeForReport } from './report-utils.mjs';
 import { collectRuntimeEnvironment } from './runtime-environment.mjs';
 
 export const PROBE_TEXT = 'Maveform synthetic download control.\n';
-const MODES = new Set(['normal', 'no-wait-after']);
+const MODES = new Set(['normal', 'no-wait-after', 'headed']);
 const STAGES = new Set(['starting', 'server', 'launch', 'environment', 'context', 'page', 'navigation',
   'download-event-and-click', 'download-save', 'download-status', 'download-content',
   'liveness-page', 'liveness-context', 'liveness-fresh-page', 'liveness-heartbeat', 'cleanup', 'complete']);
@@ -91,7 +91,7 @@ export function publicProbeReport(state) {
     } : incomplete ? { code: 'PROBE_INCOMPLETE', stage: 'complete' } : null,
     terminationCode: codeForReport(state.terminationCode), elapsedMs: integer(state.elapsedMs),
     harnessCommit: commit, runId, runAttempt, runner: 'macos-26-intel', environment,
-    settings: { channel: 'chrome', headless: true, acceptDownloads: true, noWaitAfter: state.mode === 'no-wait-after' },
+    settings: { channel: 'chrome', headless: state.mode !== 'headed', acceptDownloads: true, noWaitAfter: state.mode === 'no-wait-after' },
     secureContext: flag(state.secureContext), crossOriginIsolated: flag(state.crossOriginIsolated),
     download: downloadForReport(state.download), clickCompleted: state.clickCompleted === true,
     contentMatches: flag(state.contentMatches), downloadValidated: downloadValidated(state),
@@ -253,7 +253,7 @@ async function run(mode) {
       server.once('error', reject); server.listen(0, '127.0.0.1', resolve);
     }), 3000, 'PROBE_SERVER_FAILED');
     state.stage = 'launch'; update();
-    browser = await resource(() => chromium.launch({ channel: 'chrome', headless: true, timeout: 45_000 }),
+    browser = await resource(() => chromium.launch({ channel: 'chrome', headless: mode !== 'headed', timeout: 45_000 }),
       46_000, 'PROBE_LAUNCH_TIMEOUT', value => value.close());
     browser.on('disconnected', () => { if (!cleaning) { state.observed.browserDisconnected = true; update(); } });
     state.stage = 'environment'; update();
