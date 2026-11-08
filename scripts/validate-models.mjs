@@ -4,13 +4,17 @@ function ensure(condition, code) {
 
 export function validateCoreResult(result, fixture) {
   ensure(Array.isArray(result.words) && Array.isArray(result.sentences) && Array.isArray(result.clips), 'MODEL_RESULT_INVALID');
-  const transcript = result.words.map(word => String(word.text)).join(' ').toLowerCase();
+  const transcript = result.words.map(word => String(word?.text)).join(' ').toLowerCase();
   const matchedExpectedWords = fixture.expectedWords.filter(word => new RegExp('\\b' + word + '\\b').test(transcript));
   ensure(result.words.length >= 20 && matchedExpectedWords.length >= 3, 'MODEL_SPEECH_NOT_RECOGNIZED');
-  ensure(result.words.every(word =>
-    Number.isFinite(word.start) && Number.isFinite(word.end) &&
-    word.start >= 0 && word.end > word.start && word.end <= fixture.durationS + 1
-  ), 'MODEL_TIMESTAMPS_INVALID');
+  let zeroDurationWordCount = 0;
+  for (const [index, word] of result.words.entries()) {
+    ensure(Number.isFinite(word?.start) && Number.isFinite(word?.end) &&
+      word.start >= 0 && word.end >= word.start && word.end <= fixture.durationS + 1 &&
+      (index === 0 || word.start >= result.words[index - 1].start), 'MODEL_TIMESTAMPS_INVALID');
+    if (word.end === word.start) zeroDurationWordCount++;
+  }
+  ensure(zeroDurationWordCount < result.words.length, 'MODEL_TIMESTAMPS_INVALID');
 
   const sentenceIds = result.sentences.map(sentence => sentence.id);
   ensure(sentenceIds.length > 0 && sentenceIds.every(id => typeof id === 'string' && id.length > 0) &&
@@ -37,7 +41,7 @@ export function validateCoreResult(result, fixture) {
     ensure(result.optionalLanes?.[lane] === 'not-run', 'MODEL_OPTIONAL_LANE_MISREPORTED');
   }
   return {
-    attempted: true, completed: true, wordCount: result.words.length, sentenceCount: result.sentences.length,
+    attempted: true, completed: true, wordCount: result.words.length, zeroDurationWordCount, sentenceCount: result.sentences.length,
     embeddingCount: result.embeddingCount, clipCount: result.clips.length, matchedExpectedWords,
     coverage: { sentencesUnique: true, embeddingIdsUnique: true, sentencesCovered: sentenceIds.length },
     atlasDevice: ['wasm', 'webgpu'].includes(result.atlasDevice) ? result.atlasDevice : null,

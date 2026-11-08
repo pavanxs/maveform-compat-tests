@@ -162,6 +162,129 @@ function coreResult() {
 }
 const speechInfo = { durationS: 32, expectedWords: ['browser', 'video', 'clips', 'captions', 'recording'] };
 
+test('raw word point timestamps pass unchanged and are counted', () => {
+  const value = coreResult();
+  value.words[7].end = value.words[7].start;
+  const original = JSON.stringify(value);
+  const verified = validateCoreResult(value, speechInfo);
+  assert.equal(verified.zeroDurationWordCount, 1);
+  assert.equal(verified.wordCount, 25);
+  assert.equal(JSON.stringify(value), original);
+  assert.equal(validateCoreResult(coreResult(), speechInfo).zeroDurationWordCount, 0);
+});
+
+test('equal word starts and overlapping intervals remain valid', () => {
+  const value = coreResult();
+  value.words[4].end = 6.5;
+  value.words[5].start = value.words[4].start;
+  assert.equal(validateCoreResult(value, speechInfo).zeroDurationWordCount, 0);
+});
+
+test('invalid word values, reversed intervals and decreasing starts fail', () => {
+  const cases = [
+    ['reversed', value => { value.words[7].end = 6.5; }],
+    ['NaN start', value => { value.words[0].start = NaN; }],
+    ['NaN end', value => { value.words[0].end = NaN; }],
+    ['infinite start', value => { value.words[0].start = Infinity; }],
+    ['infinite end', value => { value.words[0].end = Infinity; }],
+    ['negative infinity', value => { value.words[0].start = -Infinity; }],
+    ['null start', value => { value.words[0].start = null; }],
+    ['null end', value => { value.words[0].end = null; }],
+    ['missing start', value => { delete value.words[0].start; }],
+    ['missing end', value => { delete value.words[0].end; }],
+    ['string start', value => { value.words[0].start = '0'; }],
+    ['string end', value => { value.words[0].end = '0.5'; }],
+    ['null word', value => { value.words[4] = null; }],
+    ['missing word', value => { delete value.words[4]; }],
+    ['negative start', value => { value.words[0].start = -0.1; }],
+    ['past allowed end', value => { value.words.at(-1).end = speechInfo.durationS + 1.01; }],
+    ['decreasing start', value => { value.words[7].start = 5.9; }],
+  ];
+  for (const [name, change] of cases) {
+    const value = coreResult();
+    change(value);
+    assert.throws(() => validateCoreResult(value, speechInfo), /MODEL_TIMESTAMPS_INVALID/, name);
+  }
+});
+
+test('all point words fail even with positive sentence and clip spans', () => {
+  const value = coreResult();
+  for (const word of value.words) word.end = word.start;
+  assert.ok(value.sentences.every(sentence => sentence.endS > sentence.startS));
+  assert.ok(value.clips.every(clip => clip.durationS > 0));
+  assert.throws(() => validateCoreResult(value, speechInfo), /MODEL_TIMESTAMPS_INVALID/);
+});
+
+test('point words do not permit zero-duration sentences', () => {
+  const value = coreResult();
+  value.words[7].end = value.words[7].start;
+  value.sentences[0].endS = value.sentences[0].startS;
+  assert.throws(() => validateCoreResult(value, speechInfo), /MODEL_TIMESTAMPS_INVALID/);
+});
+
+test('the duration plus one boundary stays inclusive for words and sentences', () => {
+  const value = coreResult();
+  value.words.at(-1).end = speechInfo.durationS + 1;
+  value.sentences.at(-1).endS = speechInfo.durationS + 1;
+  assert.equal(validateCoreResult(value, speechInfo).completed, true);
+  for (const change of [
+    result => { result.words.at(-1).end += 0.01; },
+    result => { result.sentences.at(-1).endS += 0.01; },
+  ]) {
+    const beyond = structuredClone(value);
+    change(beyond);
+    assert.throws(() => validateCoreResult(beyond, speechInfo), /MODEL_TIMESTAMPS_INVALID/);
+  }
+});
+
+test('point words still require recognized speech, complete embeddings and valid clips', () => {
+  for (const [change, expected] of [
+    [value => { value.words.forEach(word => { word.text = 'unrelated'; }); }, /MODEL_SPEECH_NOT_RECOGNIZED/],
+    [value => { value.embeddedSentenceIds = ['s1']; value.embeddingCount = 1; }, /MODEL_EMBEDDINGS_INCOMPLETE/],
+    [value => { value.clips = []; }, /MODEL_CLIPS_MISSING/],
+    [value => { value.clips[0].endS = value.clips[0].startS; value.clips[0].durationS = 0; }, /MODEL_RESULT_INVALID/],
+  ]) {
+    const value = coreResult();
+    value.words[7].end = value.words[7].start;
+    change(value);
+    assert.throws(() => validateCoreResult(value, speechInfo), expected);
+  }
+});
+
+test('the point-word count survives model validation and reporter serialization without raw words', async () => {
+  const raw = coreResult();
+  raw.buildId = 'controlled-build';
+  raw.words[7].end = raw.words[7].start;
+  raw.words[7].text = 'private-transcript-token';
+  raw.words[7].secret = 'private-extra-field';
+  let calls = 0;
+  const compat = {
+    diagnostics: { models: { attempted: false, completed: false } },
+    async call(method) { assert.equal(method, 'runCoreModels'); calls++; return raw; },
+    checkIdentity(buildId) { assert.equal(buildId, 'controlled-build'); },
+    async snapshot() { return { models: { phase: 'ready' } }; },
+  };
+  const verified = await runCoreModelCheck(compat, speechInfo);
+  assert.equal(calls, 1);
+  assert.equal(verified.zeroDurationWordCount, 1);
+  const reporter = new SafeReporter();
+  const savedLog = console.log;
+  try {
+    console.log = () => {};
+    reporter.onTestEnd({ title: 'Controlled point timestamp', expectedStatus: 'passed', location: { file: 'core-models.spec.mjs' } }, {
+      status: 'passed', duration: 1,
+      attachments: [{ name: 'safe-diagnostics', body: Buffer.from(JSON.stringify({
+        stage: 'complete', runtimeEnvironment: null, models: compat.diagnostics.models,
+      })) }],
+    });
+  } finally { console.log = savedLog; }
+  const published = reporter.tests[0].diagnostics.models;
+  assert.equal(published.zeroDurationWordCount, 1);
+  assert.equal(published.words, undefined);
+  assert.equal(published.sentences, undefined);
+  assert.doesNotMatch(JSON.stringify(reporter.tests[0]), /private-transcript-token|private-extra-field/);
+});
+
 test('real model validation requires coverage of every unique sentence', () => {
   assert.equal(validateCoreResult(coreResult(), speechInfo).coverage.sentencesCovered, 2);
   const partial = coreResult();
