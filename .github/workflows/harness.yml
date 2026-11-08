@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      intel_download_probe:
+        description: Run two synthetic Intel Mac download cases; this does not validate Maveform
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -23,3 +29,48 @@ jobs:
           package-manager-cache: false
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check
+
+  intel-download-probe:
+    name: Intel Mac synthetic download / ${{ matrix.click_mode }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.intel_download_probe }}
+    needs: check
+    runs-on: macos-26-intel
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        click_mode: [normal, no-wait-after]
+    env:
+      COMPAT_BROWSER: chrome
+      INTEL_DOWNLOAD_MODE: ${{ matrix.click_mode }}
+      DEBUG: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        timeout-minutes: 1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        timeout-minutes: 1
+        with:
+          node-version: 24
+          architecture: x64
+          package-manager-cache: false
+      - name: Install only public harness dependencies
+        timeout-minutes: 1
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare the same native Chrome channel as the smoke
+        timeout-minutes: 2
+        run: node scripts/setup-browser.mjs
+      - name: Probe one real synthetic Blob download
+        timeout-minutes: 3
+        run: node scripts/intel-download-probe.mjs "$INTEL_DOWNLOAD_MODE"
+      - name: Keep only the sanitized incremental probe report
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: intel-download-probe-${{ matrix.click_mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/intel-download-probe/${{ matrix.click_mode }}.json
+          if-no-files-found: error
+          retention-days: 1
